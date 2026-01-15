@@ -67,3 +67,7 @@ hbd --cookie-file cookies.txt --library-path "Downloaded Library" --progress
 - Add API calls for library/purchases metadata.
 - Implement download queueing, retries, and cache handling.
 - Add tests with `bun test` for API and CLI behavior.
+
+## Porting references
+
+- [Python downloader flow inventory](docs/python-download-flow.md)
