@@ -8,6 +8,7 @@ describe("resolveConfig", () => {
 
     expect(config).toEqual({
       cookieFile: undefined,
+      sessionAuth: undefined,
       libraryPath: "Downloaded Library",
       showProgress: false,
       updateOnly: false,
@@ -17,6 +18,7 @@ describe("resolveConfig", () => {
   it("applies provided overrides", () => {
     const config = resolveConfig({
       cookieFile: "cookies.txt",
+      sessionAuth: "session-value",
       libraryPath: "My Library",
       showProgress: true,
       updateOnly: true,
@@ -24,6 +26,7 @@ describe("resolveConfig", () => {
 
     expect(config).toEqual({
       cookieFile: "cookies.txt",
+      sessionAuth: "session-value",
       libraryPath: "My Library",
       showProgress: true,
       updateOnly: true,
