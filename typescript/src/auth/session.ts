@@ -6,6 +6,7 @@ import type { AppConfig } from "../config";
  */
 export type Session = {
   cookieFile?: string;
+  cookieHeader?: string;
 };
 
 /**
