@@ -29,12 +29,12 @@ typescript/
 
 ## Types
 
-| Type | Location | Purpose |
-| --- | --- | --- |
-| `AppConfig` | `src/config/index.ts` | Normalized app configuration used across modules. |
-| `Session` | `src/auth/session.ts` | Session/auth state derived from config. |
-| `ApiClient` | `src/api/client.ts` | API client contract and JSON helper. |
-| `DownloadContext` | `src/download/downloader.ts` | Inputs required for download orchestration. |
+| Type              | Location                     | Purpose                                           |
+| ----------------- | ---------------------------- | ------------------------------------------------- |
+| `AppConfig`       | `src/config/index.ts`        | Normalized app configuration used across modules. |
+| `Session`         | `src/auth/session.ts`        | Session/auth state derived from config.           |
+| `ApiClient`       | `src/api/client.ts`          | API client contract and JSON helper.              |
+| `DownloadContext` | `src/download/downloader.ts` | Inputs required for download orchestration.       |
 
 ## CLI usage
 

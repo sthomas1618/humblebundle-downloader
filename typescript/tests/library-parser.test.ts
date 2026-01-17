@@ -1,9 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from 'bun:test'
 
-import { parsePurchaseKeysFromLibraryPage } from "../src/download/downloader";
+import { parsePurchaseKeysFromLibraryPage } from '../src/download/downloader'
 
-describe("parsePurchaseKeysFromLibraryPage", () => {
-  it("extracts purchase keys from embedded JSON", () => {
+describe('parsePurchaseKeysFromLibraryPage', () => {
+  it('extracts purchase keys from embedded JSON', () => {
     const html = `
       <html>
         <body>
@@ -12,14 +12,14 @@ describe("parsePurchaseKeysFromLibraryPage", () => {
           </script>
         </body>
       </html>
-    `;
+    `
 
-    expect(parsePurchaseKeysFromLibraryPage(html)).toEqual(["key-one", "key-two"]);
-  });
+    expect(parsePurchaseKeysFromLibraryPage(html)).toEqual(['key-one', 'key-two'])
+  })
 
-  it("returns empty array when missing data", () => {
-    const html = "<html><body>No data</body></html>";
+  it('returns empty array when missing data', () => {
+    const html = '<html><body>No data</body></html>'
 
-    expect(parsePurchaseKeysFromLibraryPage(html)).toEqual([]);
-  });
-});
+    expect(parsePurchaseKeysFromLibraryPage(html)).toEqual([])
+  })
+})
