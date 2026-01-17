@@ -1,50 +1,50 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterEach, describe, expect, it } from 'bun:test'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { downloadQueue } from "../src/download/downloader";
+import { downloadQueue } from '../src/download/downloader'
 
-describe("downloadQueue", () => {
-  const originalFetch = globalThis.fetch;
+describe('downloadQueue', () => {
+  const originalFetch = globalThis.fetch
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
+    globalThis.fetch = originalFetch
+  })
 
-  it("retries failed downloads and writes the file", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "hbd-download-"));
-    const destination = join(tempDir, "file.txt");
-    let callCount = 0;
+  it('retries failed downloads and writes the file', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'hbd-download-'))
+    const destination = join(tempDir, 'file.txt')
+    let callCount = 0
 
     globalThis.fetch = async () => {
-      callCount += 1;
+      callCount += 1
       if (callCount === 1) {
-        return new Response("nope", { status: 500 });
+        return new Response('nope', { status: 500 })
       }
-      return new Response("hello");
-    };
+      return new Response('hello')
+    }
 
     try {
       const results = await downloadQueue(
         [
           {
-            url: "https://example.com/file.txt",
+            url: 'https://example.com/file.txt',
             destination,
-            label: "file.txt",
+            label: 'file.txt',
           },
         ],
-        false,
-      );
+        false
+      )
 
-      expect(results).toHaveLength(1);
-      expect(results[0]?.attempts).toBe(2);
-      expect(results[0]?.bytesWritten).toBe(5);
+      expect(results).toHaveLength(1)
+      expect(results[0]?.attempts).toBe(2)
+      expect(results[0]?.bytesWritten).toBe(5)
 
-      const contents = await readFile(destination, "utf-8");
-      expect(contents).toBe("hello");
+      const contents = await readFile(destination, 'utf-8')
+      expect(contents).toBe('hello')
     } finally {
-      await rm(tempDir, { recursive: true, force: true });
+      await rm(tempDir, { recursive: true, force: true })
     }
-  });
-});
+  })
+})

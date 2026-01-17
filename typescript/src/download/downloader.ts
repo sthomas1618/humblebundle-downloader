@@ -1,298 +1,282 @@
-import { createWriteStream } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { createHash } from "node:crypto";
+import { createWriteStream } from 'node:fs'
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
 
-import type { ApiClient } from "../api/client";
-import type { AppConfig } from "../config";
-import { buildProductFolder, buildTroveFolder, cleanName } from "../utils/fs";
-import { loadCache, saveCache, type CacheEntry } from "./cache";
+import type { ApiClient } from '../api/client'
+import type { AppConfig } from '../config'
+import { buildProductFolder, buildTroveFolder, cleanName } from '../utils/fs'
+import { loadCache, saveCache, type CacheEntry } from './cache'
 
 /**
  * Inputs required to orchestrate downloads for the Humble Bundle library.
  */
 export type DownloadContext = {
-  client: ApiClient;
-  config: AppConfig;
-};
+  client: ApiClient
+  config: AppConfig
+}
 
 export type DownloadItem = {
-  url: string;
-  destination: string;
-  label?: string;
-  expectedSize?: number;
-  expectedMd5?: string;
-  cacheKey?: string;
-  cacheEntry?: CacheEntry;
-  cacheUpdate?: CacheEntry;
-};
+  url: string
+  destination: string
+  label?: string
+  expectedSize?: number
+  expectedMd5?: string
+  cacheKey?: string
+  cacheEntry?: CacheEntry
+  cacheUpdate?: CacheEntry
+}
 
 export type DownloadResult = {
-  item: DownloadItem;
-  bytesWritten: number;
-  attempts: number;
-  skipped?: boolean;
-  lastModified?: string;
-};
+  item: DownloadItem
+  bytesWritten: number
+  attempts: number
+  skipped?: boolean
+  lastModified?: string
+}
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) {
-    return `${bytes} B`;
+    return `${bytes} B`
   }
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unitIndex = -1;
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = -1
   while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
+    value /= 1024
+    unitIndex += 1
   }
-  return `${value.toFixed(1)} ${units[unitIndex]}`;
-};
+  return `${value.toFixed(1)} ${units[unitIndex]}`
+}
 
 const reportProgress = (label: string, transferred: number, total?: number) => {
-  if (typeof total === "number" && total > 0) {
-    const barWidth = 50;
-    const done = Math.min(barWidth, Math.floor((transferred / total) * barWidth));
-    const percent = Math.min(100, Math.round((done / barWidth) * 100));
-    const filler = "=".repeat(Math.max(0, done));
-    const space = " ".repeat(Math.max(0, barWidth - done));
-    process.stdout.write(
-      `\r${label} ${percent}% [${filler}${space}]`,
-    );
+  if (typeof total === 'number' && total > 0) {
+    const barWidth = 50
+    const done = Math.min(barWidth, Math.floor((transferred / total) * barWidth))
+    const percent = Math.min(100, Math.round((done / barWidth) * 100))
+    const filler = '='.repeat(Math.max(0, done))
+    const space = ' '.repeat(Math.max(0, barWidth - done))
+    process.stdout.write(`\r${label} ${percent}% [${filler}${space}]`)
   } else {
-    process.stdout.write(`\r${label} ${transferred}`);
+    process.stdout.write(`\r${label} ${transferred}`)
   }
-};
+}
 
 const downloadToFile = async (
   item: DownloadItem,
-  showProgress: boolean,
+  showProgress: boolean
 ): Promise<{ bytesWritten: number; skipped?: boolean; lastModified?: string }> => {
-  const response = await fetch(item.url);
+  const response = await fetch(item.url)
   if (!response.ok) {
-    throw new Error(`Failed to download ${item.url}: ${response.status}`);
+    throw new Error(`Failed to download ${item.url}: ${response.status}`)
   }
 
-  const total = response.headers.get("content-length");
-  const totalBytes = total ? Number.parseInt(total, 10) : undefined;
-  const lastModified = response.headers.get("last-modified") ?? undefined;
+  const total = response.headers.get('content-length')
+  const totalBytes = total ? Number.parseInt(total, 10) : undefined
+  const lastModified = response.headers.get('last-modified') ?? undefined
   if (lastModified && item.cacheEntry?.urlLastModified === lastModified) {
-    return { bytesWritten: 0, skipped: true, lastModified };
+    return { bytesWritten: 0, skipped: true, lastModified }
   }
 
-  await mkdir(dirname(item.destination), { recursive: true });
-  const output = createWriteStream(item.destination);
+  await mkdir(dirname(item.destination), { recursive: true })
+  const output = createWriteStream(item.destination)
 
-  const expectedBytes = item.expectedSize ?? totalBytes;
-  const label = item.label ?? item.destination;
-  const hash = item.expectedMd5 ? createHash("md5") : null;
+  const expectedBytes = item.expectedSize ?? totalBytes
+  const label = item.label ?? item.destination
+  const hash = item.expectedMd5 ? createHash('md5') : null
 
-  let written = 0;
-  const reader = response.body?.getReader();
+  let written = 0
+  const reader = response.body?.getReader()
   if (!reader) {
-    throw new Error(`No response body for ${item.url}`);
+    throw new Error(`No response body for ${item.url}`)
   }
 
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await reader.read()
     if (done) {
-      break;
+      break
     }
 
     if (value) {
-      written += value.length;
+      written += value.length
       if (hash) {
-        hash.update(value);
+        hash.update(value)
       }
-      output.write(Buffer.from(value));
+      output.write(Buffer.from(value))
       if (showProgress) {
-        reportProgress(label, written, totalBytes);
+        reportProgress(label, written, totalBytes)
       }
     }
   }
 
   await new Promise<void>((resolve, reject) => {
-    output.end(() => resolve());
-    output.on("error", reject);
-  });
+    output.end(() => resolve())
+    output.on('error', reject)
+  })
 
   if (showProgress) {
-    process.stdout.write("\n");
+    process.stdout.write('\n')
   }
 
-  if (typeof expectedBytes === "number" && written < expectedBytes) {
-    throw new Error(
-      `Incomplete download for ${item.url}: ${written}/${expectedBytes} bytes`,
-    );
+  if (typeof expectedBytes === 'number' && written < expectedBytes) {
+    throw new Error(`Incomplete download for ${item.url}: ${written}/${expectedBytes} bytes`)
   }
 
   if (hash) {
-    const digest = hash.digest("hex");
+    const digest = hash.digest('hex')
     if (digest !== item.expectedMd5) {
-      throw new Error(
-        `MD5 mismatch for ${item.url}: expected ${item.expectedMd5}, got ${digest}`,
-      );
+      throw new Error(`MD5 mismatch for ${item.url}: expected ${item.expectedMd5}, got ${digest}`)
     }
   }
 
-  return { bytesWritten: written, lastModified };
-};
+  return { bytesWritten: written, lastModified }
+}
 
 const downloadWithRetry = async (
   item: DownloadItem,
   showProgress: boolean,
   maxAttempts = 3,
-  baseDelayMs = 1000,
+  baseDelayMs = 1000
 ): Promise<DownloadResult> => {
-  let attempt = 0;
+  let attempt = 0
 
   while (attempt < maxAttempts) {
-    attempt += 1;
+    attempt += 1
     try {
-      const outcome = await downloadToFile(item, showProgress);
+      const outcome = await downloadToFile(item, showProgress)
       return {
         item,
         bytesWritten: outcome.bytesWritten,
         attempts: attempt,
         skipped: outcome.skipped,
         lastModified: outcome.lastModified,
-      };
+      }
     } catch (error) {
       if (attempt >= maxAttempts) {
-        throw error;
+        throw error
       }
-      const delay = baseDelayMs * attempt;
-      await sleep(delay);
+      const delay = baseDelayMs * attempt
+      await sleep(delay)
     }
   }
 
-  return { item, bytesWritten: 0, attempts: attempt };
-};
+  return { item, bytesWritten: 0, attempts: attempt }
+}
 
-export const shouldDownloadPlatform = (
-  platform: string,
-  config: AppConfig,
-): boolean => {
+export const shouldDownloadPlatform = (platform: string, config: AppConfig): boolean => {
   if (!config.platformInclude || config.platformInclude.length === 0) {
-    return true;
+    return true
   }
-  const normalized = config.platformInclude.map((value) => value.toLowerCase());
-  if (normalized.includes("all")) {
-    return true;
+  const normalized = config.platformInclude.map((value) => value.toLowerCase())
+  if (normalized.includes('all')) {
+    return true
   }
-  return normalized.includes(platform.toLowerCase());
-};
+  return normalized.includes(platform.toLowerCase())
+}
 
-export const shouldDownloadExt = (
-  filename: string,
-  config: AppConfig,
-): boolean => {
-  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+export const shouldDownloadExt = (filename: string, config: AppConfig): boolean => {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
   if (config.extInclude && config.extInclude.length > 0) {
-    return config.extInclude.map((value) => value.toLowerCase()).includes(ext);
+    return config.extInclude.map((value) => value.toLowerCase()).includes(ext)
   }
   if (config.extExclude && config.extExclude.length > 0) {
-    return !config.extExclude.map((value) => value.toLowerCase()).includes(ext);
+    return !config.extExclude.map((value) => value.toLowerCase()).includes(ext)
   }
-  return true;
-};
+  return true
+}
 
 const getFilenameFromUrl = (url: string): string => {
-  const withoutQuery = url.split("?")[0] ?? url;
-  const parts = withoutQuery.split("/");
-  return parts[parts.length - 1] ?? cleanName(url);
-};
+  const withoutQuery = url.split('?')[0] ?? url
+  const parts = withoutQuery.split('/')
+  return parts[parts.length - 1] ?? cleanName(url)
+}
 
-type AsmManifest = Record<string, string>;
+type AsmManifest = Record<string, string>
 
 const parseAsmPlayerData = (html: string): AsmManifest | null => {
-  const match = html.match(
-    /id=["']webpack-asm-player-data["'][^>]*>([^<]+)<\/[^>]+>/i,
-  );
+  const match = html.match(/id=["']webpack-asm-player-data["'][^>]*>([^<]+)<\/[^>]+>/i)
 
   if (!match) {
-    return null;
+    return null
   }
 
   try {
     const parsed = JSON.parse(match[1]) as {
-      asmOptions?: { manifest?: Record<string, string> };
-    };
-    return parsed.asmOptions?.manifest ?? null;
+      asmOptions?: { manifest?: Record<string, string> }
+    }
+    return parsed.asmOptions?.manifest ?? null
   } catch {
-    return null;
+    return null
   }
-};
+}
 
 const writeLocalAsmHtml = async (
   localPath: string,
   html: string,
-  manifest: AsmManifest,
+  manifest: AsmManifest
 ): Promise<void> => {
-  let output = html;
+  let output = html
   for (const [localFilename, remoteFile] of Object.entries(manifest)) {
     output = output.replaceAll(
       `"${localFilename}": "${remoteFile}"`,
-      `"${localFilename}": "${localFilename}"`,
-    );
+      `"${localFilename}": "${localFilename}"`
+    )
   }
 
-  await writeFile(localPath, output);
-};
+  await writeFile(localPath, output)
+}
 
 export const formatExternalLinkMessage = (
   bundleTitle: string,
   productTitle: string,
-  url: string,
-): string =>
-  `External link found: ${bundleTitle}/${productTitle} : ${url}`;
+  url: string
+): string => `External link found: ${bundleTitle}/${productTitle} : ${url}`
 
 export const buildTroveDownloadItems = async (
-  products: Awaited<ReturnType<ApiClient["getTroveProducts"]>>,
+  products: Awaited<ReturnType<ApiClient['getTroveProducts']>>,
   config: AppConfig,
   cache: Record<string, CacheEntry>,
-  signDownload: ApiClient["signTroveDownload"],
+  signDownload: ApiClient['signTroveDownload']
 ): Promise<DownloadItem[]> => {
-  const items: DownloadItem[] = [];
+  const items: DownloadItem[] = []
 
   for (const product of products) {
-    const title = cleanName(product["human-name"]);
-    const productFolder = buildTroveFolder(config.libraryPath, title);
+    const title = cleanName(product['human-name'])
+    const productFolder = buildTroveFolder(config.libraryPath, title)
 
     for (const [platform, download] of Object.entries(product.downloads)) {
       if (!shouldDownloadPlatform(platform, config)) {
-        continue;
+        continue
       }
 
-      const filename = getFilenameFromUrl(download.url.web);
+      const filename = getFilenameFromUrl(download.url.web)
       if (!shouldDownloadExt(filename, config)) {
-        continue;
+        continue
       }
 
-      const cacheKey = `trove:${filename}`;
-      const cacheEntry = cache[cacheKey];
-      const uploadedAt =
-        download.uploaded_at ?? download.timestamp ?? product.date_added ?? "0";
-      const md5 = download.md5 ?? "UNKNOWN_MD5";
+      const cacheKey = `trove:${filename}`
+      const cacheEntry = cache[cacheKey]
+      const uploadedAt = download.uploaded_at ?? download.timestamp ?? product.date_added ?? '0'
+      const md5 = download.md5 ?? 'UNKNOWN_MD5'
       if (cacheEntry && !config.updateOnly) {
-        continue;
+        continue
       }
       if (
         cacheEntry &&
         config.updateOnly &&
         (cacheEntry.uploadedAt === uploadedAt || cacheEntry.md5 === md5)
       ) {
-        continue;
+        continue
       }
 
-      const sign = await signDownload(download.machine_name, filename);
-      if (sign._errors === "Unauthorized") {
-        throw new Error("Your account does not have access to the Trove.");
+      const sign = await signDownload(download.machine_name, filename)
+      if (sign._errors === 'Unauthorized') {
+        throw new Error('Your account does not have access to the Trove.')
       }
       if (!sign.signed_url) {
-        continue;
+        continue
       }
 
       items.push({
@@ -306,26 +290,26 @@ export const buildTroveDownloadItems = async (
           uploadedAt,
           md5,
         },
-      });
+      })
     }
   }
 
-  return items;
-};
+  return items
+}
 
 export const downloadQueue = async (
   items: DownloadItem[],
-  showProgress: boolean,
+  showProgress: boolean
 ): Promise<DownloadResult[]> => {
-  const results: DownloadResult[] = [];
+  const results: DownloadResult[] = []
 
   for (const item of items) {
-    const result = await downloadWithRetry(item, showProgress);
-    results.push(result);
+    const result = await downloadWithRetry(item, showProgress)
+    results.push(result)
   }
 
-  return results;
-};
+  return results
+}
 
 /**
  * Coordinate the download flow.
@@ -334,78 +318,71 @@ export const downloadQueue = async (
  * purchase/product orchestration is still being ported.
  */
 export const parsePurchaseKeysFromLibraryPage = (html: string): string[] => {
-  const match = html.match(
-    /id=["']user-home-json-data["'][^>]*>([^<]+)<\/[^>]+>/i,
-  );
+  const match = html.match(/id=["']user-home-json-data["'][^>]*>([^<]+)<\/[^>]+>/i)
 
   if (!match) {
-    return [];
+    return []
   }
 
-  const jsonText = match[1]?.trim();
+  const jsonText = match[1]?.trim()
   if (!jsonText) {
-    return [];
+    return []
   }
 
   try {
-    const parsed = JSON.parse(jsonText) as { gamekeys?: string[] };
-    return Array.isArray(parsed.gamekeys) ? parsed.gamekeys : [];
+    const parsed = JSON.parse(jsonText) as { gamekeys?: string[] }
+    return Array.isArray(parsed.gamekeys) ? parsed.gamekeys : []
   } catch {
-    return [];
+    return []
   }
-};
+}
 
 export const downloadLibrary = async ({ client, config }: DownloadContext) => {
-  const cache = await loadCache(config.libraryPath);
+  const cache = await loadCache(config.libraryPath)
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
       ? config.purchaseKeys
-      : parsePurchaseKeysFromLibraryPage(await client.getLibraryPage());
+      : parsePurchaseKeysFromLibraryPage(await client.getLibraryPage())
 
   if (purchaseKeys.length === 0 && !config.troveOnly) {
-    throw new Error("Unable to determine purchase keys from the library page.");
+    throw new Error('Unable to determine purchase keys from the library page.')
   }
 
-  const items: DownloadItem[] = [];
+  const items: DownloadItem[] = []
 
   if (config.troveOnly) {
-    const troveProducts = await client.getTroveProducts();
+    const troveProducts = await client.getTroveProducts()
     items.push(
-      ...(await buildTroveDownloadItems(
-        troveProducts,
-        config,
-        cache,
-        client.signTroveDownload,
-      )),
-    );
+      ...(await buildTroveDownloadItems(troveProducts, config, cache, client.signTroveDownload))
+    )
   } else {
     for (const orderId of purchaseKeys) {
-      const order = await client.getOrderDetails(orderId);
-      const bundleTitle = order.product.human_name;
+      const order = await client.getOrderDetails(orderId)
+      const bundleTitle = order.product.human_name
 
       for (const product of order.subproducts) {
         const productFolder = buildProductFolder(
           config.libraryPath,
           bundleTitle,
-          product.human_name,
-        );
+          product.human_name
+        )
 
         for (const downloadType of product.downloads) {
           if (!shouldDownloadPlatform(downloadType.platform, config)) {
-            continue;
+            continue
           }
 
           for (const fileType of downloadType.download_struct) {
             if (fileType.url?.web) {
-              const filename = getFilenameFromUrl(fileType.url.web);
+              const filename = getFilenameFromUrl(fileType.url.web)
               if (!shouldDownloadExt(filename, config)) {
-                continue;
+                continue
               }
 
-              const cacheKey = `${orderId}:${filename}`;
-              const cacheEntry = cache[cacheKey];
+              const cacheKey = `${orderId}:${filename}`
+              const cacheEntry = cache[cacheKey]
               if (cacheEntry && !config.updateOnly) {
-                continue;
+                continue
               }
 
               items.push({
@@ -416,86 +393,76 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
                 expectedMd5: fileType.md5,
                 cacheKey,
                 cacheEntry,
-              });
-              continue;
+              })
+              continue
             }
 
             if (fileType.external_link) {
               console.info(
-                formatExternalLinkMessage(
-                  bundleTitle,
-                  product.human_name,
-                  fileType.external_link,
-                ),
-              );
-              continue;
+                formatExternalLinkMessage(bundleTitle, product.human_name, fileType.external_link)
+              )
+              continue
             }
 
             if (fileType.asm_config) {
-              const gameName = fileType.asm_config.display_item;
-              const asmFile = fileType.asm_manifest?.asmFile;
+              const gameName = fileType.asm_config.display_item
+              const asmFile = fileType.asm_manifest?.asmFile
               if (!gameName || !asmFile) {
                 console.info(
-                  `ASM.js content missing metadata: ${bundleTitle}/${product.human_name}`,
-                );
-                continue;
+                  `ASM.js content missing metadata: ${bundleTitle}/${product.human_name}`
+                )
+                continue
               }
 
-              const localFolder = join(productFolder, gameName);
-              await mkdir(localFolder, { recursive: true });
+              const localFolder = join(productFolder, gameName)
+              await mkdir(localFolder, { recursive: true })
 
-              const asmFilename = `${gameName}.html`;
-              const asmLocalFilename = `${gameName}.local.html`;
-              const asmCacheKey = `${orderId}:${asmFilename}`;
-              const asmCacheEntry = cache[asmCacheKey];
+              const asmFilename = `${gameName}.html`
+              const asmLocalFilename = `${gameName}.local.html`
+              const asmCacheKey = `${orderId}:${asmFilename}`
+              const asmCacheEntry = cache[asmCacheKey]
 
-              let html = "";
-              let lastModified: string | undefined;
+              let html = ''
+              let lastModified: string | undefined
               if (asmCacheEntry && !config.updateOnly) {
                 try {
-                  html = await readFile(join(localFolder, asmFilename), "utf-8");
+                  html = await readFile(join(localFolder, asmFilename), 'utf-8')
                 } catch {
-                  html = "";
+                  html = ''
                 }
               }
 
               if (!html) {
-                const gameAsmName = asmFile.split("/")[2] ?? asmFile;
-                const asmUrl = `https://www.humblebundle.com/play/asmjs/${gameAsmName}/${orderId}`;
-                const response = await fetch(asmUrl);
+                const gameAsmName = asmFile.split('/')[2] ?? asmFile
+                const asmUrl = `https://www.humblebundle.com/play/asmjs/${gameAsmName}/${orderId}`
+                const response = await fetch(asmUrl)
                 if (!response.ok) {
                   console.info(
-                    `Failed to download ASM.js HTML: ${bundleTitle}/${product.human_name}`,
-                  );
-                  continue;
+                    `Failed to download ASM.js HTML: ${bundleTitle}/${product.human_name}`
+                  )
+                  continue
                 }
-                lastModified = response.headers.get("last-modified") ?? undefined;
-                html = await response.text();
-                await writeFile(join(localFolder, asmFilename), html);
+                lastModified = response.headers.get('last-modified') ?? undefined
+                html = await response.text()
+                await writeFile(join(localFolder, asmFilename), html)
                 cache[asmCacheKey] = {
                   urlLastModified: lastModified ?? new Date().toUTCString(),
-                };
+                }
               }
 
-              const manifest = parseAsmPlayerData(html);
+              const manifest = parseAsmPlayerData(html)
               if (!manifest) {
-                console.info(
-                  `ASM.js manifest missing: ${bundleTitle}/${product.human_name}`,
-                );
-                continue;
+                console.info(`ASM.js manifest missing: ${bundleTitle}/${product.human_name}`)
+                continue
               }
 
-              await writeLocalAsmHtml(
-                join(localFolder, asmLocalFilename),
-                html,
-                manifest,
-              );
+              await writeLocalAsmHtml(join(localFolder, asmLocalFilename), html, manifest)
 
               for (const [localFilename, remoteFile] of Object.entries(manifest)) {
-                const cacheKey = `${orderId}:${gameName}:${localFilename}`;
-                const cacheEntry = cache[cacheKey];
+                const cacheKey = `${orderId}:${gameName}:${localFilename}`
+                const cacheEntry = cache[cacheKey]
                 if (cacheEntry && !config.updateOnly) {
-                  continue;
+                  continue
                 }
 
                 items.push({
@@ -504,7 +471,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
                   label: localFilename,
                   cacheKey,
                   cacheEntry,
-                });
+                })
               }
             }
           }
@@ -513,200 +480,195 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
     }
   }
 
-  const results = await downloadQueue(items, config.showProgress);
+  const results = await downloadQueue(items, config.showProgress)
 
   for (const result of results) {
-    const cacheKey = result.item.cacheKey;
+    const cacheKey = result.item.cacheKey
     if (!cacheKey || result.skipped) {
-      continue;
+      continue
     }
 
-    const cacheUpdate = result.item.cacheUpdate ?? {};
-    const lastModified =
-      result.lastModified ?? new Date().toUTCString();
+    const cacheUpdate = result.item.cacheUpdate ?? {}
+    const lastModified = result.lastModified ?? new Date().toUTCString()
 
     cache[cacheKey] = {
       ...cacheUpdate,
       urlLastModified: cacheUpdate.urlLastModified ?? lastModified,
-    };
+    }
   }
 
-  await saveCache(config.libraryPath, cache);
+  await saveCache(config.libraryPath, cache)
 
   return {
     processed: results.length,
-  };
-};
+  }
+}
 
 const fileExists = async (path: string): Promise<boolean> => {
   try {
-    await access(path);
-    return true;
+    await access(path)
+    return true
   } catch {
-    return false;
+    return false
   }
-};
+}
 
-const fetchLastModified = async (
-  client: ApiClient,
-  url: string,
-): Promise<string | undefined> => {
-  const headers = new Headers();
-  headers.set("User-Agent", "humblebundle-downloader-ts");
+const fetchLastModified = async (client: ApiClient, url: string): Promise<string | undefined> => {
+  const headers = new Headers()
+  headers.set('User-Agent', 'humblebundle-downloader-ts')
   if (client.session.cookieHeader) {
-    headers.set("cookie", client.session.cookieHeader);
+    headers.set('cookie', client.session.cookieHeader)
   }
 
-  const response = await fetch(url, { method: "HEAD", headers });
+  const response = await fetch(url, { method: 'HEAD', headers })
   if (!response.ok) {
-    return undefined;
+    return undefined
   }
-  return response.headers.get("last-modified") ?? undefined;
-};
+  return response.headers.get('last-modified') ?? undefined
+}
 
 const auditCacheEntry = async (
   cache: Record<string, CacheEntry>,
   cacheKey: string,
   localPath: string,
-  metadata: CacheEntry,
+  metadata: CacheEntry
 ): Promise<void> => {
   if (!(await fileExists(localPath))) {
-    return;
+    return
   }
-  cache[cacheKey] = metadata;
-};
+  cache[cacheKey] = metadata
+}
 
 export const auditLibrary = async ({ client, config }: DownloadContext) => {
-  const cache = await loadCache(config.libraryPath);
+  const cache = await loadCache(config.libraryPath)
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
       ? config.purchaseKeys
-      : parsePurchaseKeysFromLibraryPage(await client.getLibraryPage());
+      : parsePurchaseKeysFromLibraryPage(await client.getLibraryPage())
 
   if (purchaseKeys.length === 0 && !config.troveOnly) {
-    throw new Error("Unable to determine purchase keys from the library page.");
+    throw new Error('Unable to determine purchase keys from the library page.')
   }
 
-  const now = new Date().toUTCString();
+  const now = new Date().toUTCString()
 
   if (config.troveOnly) {
-    const troveProducts = await client.getTroveProducts();
+    const troveProducts = await client.getTroveProducts()
     for (const product of troveProducts) {
-      const title = cleanName(product["human-name"]);
-      const productFolder = buildTroveFolder(config.libraryPath, title);
+      const title = cleanName(product['human-name'])
+      const productFolder = buildTroveFolder(config.libraryPath, title)
 
       for (const [platform, download] of Object.entries(product.downloads)) {
         if (!shouldDownloadPlatform(platform, config)) {
-          continue;
+          continue
         }
 
-        const filename = getFilenameFromUrl(download.url.web);
+        const filename = getFilenameFromUrl(download.url.web)
         if (!shouldDownloadExt(filename, config)) {
-          continue;
+          continue
         }
 
-        const cacheKey = `trove:${filename}`;
-        const uploadedAt =
-          download.uploaded_at ?? download.timestamp ?? product.date_added ?? "0";
-        const md5 = download.md5 ?? "UNKNOWN_MD5";
-        const localPath = join(productFolder, filename);
+        const cacheKey = `trove:${filename}`
+        const uploadedAt = download.uploaded_at ?? download.timestamp ?? product.date_added ?? '0'
+        const md5 = download.md5 ?? 'UNKNOWN_MD5'
+        const localPath = join(productFolder, filename)
 
         await auditCacheEntry(cache, cacheKey, localPath, {
           uploadedAt,
           md5,
-        });
+        })
       }
     }
   } else {
     for (const orderId of purchaseKeys) {
-      const order = await client.getOrderDetails(orderId);
-      const bundleTitle = order.product.human_name;
+      const order = await client.getOrderDetails(orderId)
+      const bundleTitle = order.product.human_name
 
       for (const product of order.subproducts) {
         const productFolder = buildProductFolder(
           config.libraryPath,
           bundleTitle,
-          product.human_name,
-        );
+          product.human_name
+        )
 
         for (const downloadType of product.downloads) {
           if (!shouldDownloadPlatform(downloadType.platform, config)) {
-            continue;
+            continue
           }
 
           for (const fileType of downloadType.download_struct) {
             if (fileType.url?.web) {
-              const filename = getFilenameFromUrl(fileType.url.web);
+              const filename = getFilenameFromUrl(fileType.url.web)
               if (!shouldDownloadExt(filename, config)) {
-                continue;
+                continue
               }
 
-              const cacheKey = `${orderId}:${filename}`;
-              const localPath = join(productFolder, filename);
+              const cacheKey = `${orderId}:${filename}`
+              const localPath = join(productFolder, filename)
               if (!(await fileExists(localPath))) {
-                continue;
+                continue
               }
               const lastModified = config.offlineAudit
                 ? undefined
-                : await fetchLastModified(client, fileType.url.web);
+                : await fetchLastModified(client, fileType.url.web)
 
               cache[cacheKey] = {
                 urlLastModified: lastModified ?? now,
-              };
-              continue;
+              }
+              continue
             }
 
             if (fileType.asm_config) {
-              const gameName = fileType.asm_config.display_item;
-              const asmFile = fileType.asm_manifest?.asmFile;
+              const gameName = fileType.asm_config.display_item
+              const asmFile = fileType.asm_manifest?.asmFile
               if (!gameName || !asmFile) {
-                continue;
+                continue
               }
 
-              const localFolder = join(productFolder, gameName);
-              const asmFilename = `${gameName}.html`;
-              const asmLocalFilename = `${gameName}.local.html`;
-              const asmCacheKey = `${orderId}:${asmFilename}`;
-              const asmPath = join(localFolder, asmFilename);
+              const localFolder = join(productFolder, gameName)
+              const asmFilename = `${gameName}.html`
+              const asmLocalFilename = `${gameName}.local.html`
+              const asmCacheKey = `${orderId}:${asmFilename}`
+              const asmPath = join(localFolder, asmFilename)
               if (await fileExists(asmPath)) {
                 const lastModified = config.offlineAudit
                   ? undefined
                   : await fetchLastModified(
                       client,
-                      `https://www.humblebundle.com/play/asmjs/${asmFile.split("/")[2] ?? asmFile}/${orderId}`,
-                    );
+                      `https://www.humblebundle.com/play/asmjs/${asmFile.split('/')[2] ?? asmFile}/${orderId}`
+                    )
                 cache[asmCacheKey] = {
                   urlLastModified: lastModified ?? now,
-                };
-              }
-
-              let html = "";
-              if (await fileExists(asmPath)) {
-                html = await readFile(asmPath, "utf-8");
-              } else {
-                const localHtmlPath = join(localFolder, asmLocalFilename);
-                if (await fileExists(localHtmlPath)) {
-                  html = await readFile(localHtmlPath, "utf-8");
                 }
               }
 
-              const manifest = html ? parseAsmPlayerData(html) : null;
+              let html = ''
+              if (await fileExists(asmPath)) {
+                html = await readFile(asmPath, 'utf-8')
+              } else {
+                const localHtmlPath = join(localFolder, asmLocalFilename)
+                if (await fileExists(localHtmlPath)) {
+                  html = await readFile(localHtmlPath, 'utf-8')
+                }
+              }
+
+              const manifest = html ? parseAsmPlayerData(html) : null
               if (!manifest) {
-                continue;
+                continue
               }
 
               for (const [localFilename, remoteFile] of Object.entries(manifest)) {
-                const cacheKey = `${orderId}:${gameName}:${localFilename}`;
-                const localPath = join(localFolder, localFilename);
+                const cacheKey = `${orderId}:${gameName}:${localFilename}`
+                const localPath = join(localFolder, localFilename)
                 if (!(await fileExists(localPath))) {
-                  continue;
+                  continue
                 }
                 const fileLastModified = config.offlineAudit
                   ? undefined
-                  : await fetchLastModified(client, remoteFile);
+                  : await fetchLastModified(client, remoteFile)
                 cache[cacheKey] = {
                   urlLastModified: fileLastModified ?? now,
-                };
+                }
               }
             }
           }
@@ -715,5 +677,5 @@ export const auditLibrary = async ({ client, config }: DownloadContext) => {
     }
   }
 
-  await saveCache(config.libraryPath, cache);
-};
+  await saveCache(config.libraryPath, cache)
+}
