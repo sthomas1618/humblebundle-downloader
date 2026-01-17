@@ -18,6 +18,7 @@ After that it will only download the content that has been updated or is missing
 - optional progress bar for each item downloaded _(`--progress` flag)_
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
+- audit an existing library to rebuild the cache _(`hbd audit`)_
 
 
 ## Install
@@ -61,6 +62,18 @@ _If using the docker image, exclude the `hbd` part of the command_
 
 This directory structure will be used:  
 `Downloaded Library/Purchase Name/Item Name/downloaded_file.ext`
+
+
+### 3. Auditing an existing library
+
+If you already have a library downloaded but the cache file is missing or stale,
+you can rebuild it without downloading anything:  
+`hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"`  
+_To skip remote metadata lookups, add `--offline`_  
+
+This scans your existing files, compares them against your Humble Bundle
+purchases, and updates `.cache.json` so future downloads only fetch missing or
+updated content.
 
 
 ## Notes

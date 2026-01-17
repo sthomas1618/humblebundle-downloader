@@ -56,6 +56,14 @@ Common options mirrored from the Python CLI:
 - `-i, --include <ext...>`: Only include file extensions.
 - `-k, --keys <key...>`: Limit to purchase keys.
 
+To rebuild the cache from existing files without downloading:
+
+```bash
+bun run hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"
+```
+
+Add `--offline` to skip remote metadata lookups during audit runs.
+
 You can also use the CLI entrypoint directly if you prefer:
 
 ```bash

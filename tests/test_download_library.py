@@ -1,3 +1,5 @@
+import json
+
 from humblebundle_downloader.download_library import DownloadLibrary
 
 
@@ -76,3 +78,51 @@ def test_download_platform_filter_audio():
     )
     assert dl._should_download_platform("ebook") is False
     assert dl._should_download_platform("audio") is True
+
+
+def test_audit_local_file_updates_cache(tmp_path, monkeypatch):
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    cache_file = library_path / ".cache.json"
+    file_path = library_path / "bundle" / "item.pdf"
+    file_path.parent.mkdir()
+    file_path.write_text("content")
+
+    dl = DownloadLibrary(str(library_path))
+    dl.cache_file = str(cache_file)
+    dl.cache_data = {}
+
+    monkeypatch.setattr(
+        dl, "_get_remote_last_modified", lambda remote_url: "Mon, 01 Jan 2024 00:00:00 GMT"
+    )
+
+    dl._audit_local_file(
+        "order:file.pdf",
+        str(file_path),
+        remote_url="https://example.com/file.pdf",
+    )
+
+    assert dl.cache_data["order:file.pdf"]["url_last_modified"] == (
+        "Mon, 01 Jan 2024 00:00:00 GMT"
+    )
+    with open(cache_file, "r") as cache_handle:
+        cache_json = json.load(cache_handle)
+    assert "order:file.pdf" in cache_json
+
+
+def test_audit_local_file_missing_skips_cache(tmp_path):
+    library_path = tmp_path / "library"
+    library_path.mkdir()
+    cache_file = library_path / ".cache.json"
+    dl = DownloadLibrary(str(library_path))
+    dl.cache_file = str(cache_file)
+    dl.cache_data = {}
+
+    dl._audit_local_file(
+        "order:file.pdf",
+        str(library_path / "missing.pdf"),
+        remote_url="https://example.com/file.pdf",
+    )
+
+    assert dl.cache_data == {}
+    assert cache_file.exists() is False
