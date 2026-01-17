@@ -22,6 +22,8 @@ export type AppConfig = {
   extExclude?: string[];
   /** Only download items from specific purchase keys. */
   purchaseKeys?: string[];
+  /** Skip remote metadata lookups during audit. */
+  offlineAudit: boolean;
 };
 
 type ConfigOverrides = {
@@ -35,6 +37,7 @@ type ConfigOverrides = {
   extInclude?: string[];
   extExclude?: string[];
   purchaseKeys?: string[];
+  offlineAudit?: boolean;
 };
 
 /**
@@ -55,5 +58,6 @@ export const resolveConfig = (overrides: ConfigOverrides): AppConfig => {
     extInclude: normalize(overrides.extInclude),
     extExclude: normalize(overrides.extExclude),
     purchaseKeys: overrides.purchaseKeys,
+    offlineAudit: overrides.offlineAudit ?? false,
   };
 };

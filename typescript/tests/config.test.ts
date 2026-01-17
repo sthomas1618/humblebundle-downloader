@@ -17,6 +17,7 @@ describe("resolveConfig", () => {
       extInclude: undefined,
       extExclude: undefined,
       purchaseKeys: undefined,
+      offlineAudit: false,
     });
   });
 
@@ -32,6 +33,7 @@ describe("resolveConfig", () => {
       extInclude: ["pdf", "mobi"],
       extExclude: ["zip"],
       purchaseKeys: ["key1", "key2"],
+      offlineAudit: true,
     });
 
     expect(config).toEqual({
@@ -45,6 +47,7 @@ describe("resolveConfig", () => {
       extInclude: ["pdf", "mobi"],
       extExclude: ["zip"],
       purchaseKeys: ["key1", "key2"],
+      offlineAudit: true,
     });
   });
 

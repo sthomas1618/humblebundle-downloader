@@ -17,3 +17,18 @@ def test_no_args():
     with pytest.raises(SystemExit) as ex:
         parse_args([])
     assert ex.value.code == 2
+
+
+def test_audit_action():
+    args = parse_args(["audit", "-l", "some_path", "-c", "fake_cookie"])
+    assert args.command == "audit"
+    assert args.library_path == "some_path"
+    assert args.cookie_file == "fake_cookie"
+
+
+def test_audit_action_offline():
+    args = parse_args(
+        ["audit", "-l", "some_path", "-c", "fake_cookie", "--offline"]
+    )
+    assert args.command == "audit"
+    assert args.offline is True

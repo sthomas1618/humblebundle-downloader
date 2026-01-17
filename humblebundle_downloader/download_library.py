@@ -34,6 +34,8 @@ class DownloadLibrary:
         purchase_keys=None,
         trove=False,
         update=False,
+        audit=False,
+        offline=False,
     ):
         self.library_path = library_path
         self.progress_bar = progress_bar
@@ -52,6 +54,8 @@ class DownloadLibrary:
         self.purchase_keys = purchase_keys
         self.trove = trove
         self.update = update
+        self.audit = audit
+        self.offline = offline
 
         self.session = requests.Session()
         if cookie_path:
@@ -75,6 +79,10 @@ class DownloadLibrary:
             self.purchase_keys if self.purchase_keys else self._get_purchase_keys()
         )
 
+        if self.audit is True:
+            self._audit_library()
+            return
+
         if self.trove is True:
             logger.info("Only checking the Humble Trove...")
             for product in self._get_trove_products():
@@ -83,6 +91,17 @@ class DownloadLibrary:
         else:
             for order_id in self.purchase_keys:
                 self._process_order_id(order_id)
+
+    def _audit_library(self):
+        if self.trove is True:
+            logger.info("Auditing Humble Trove library cache...")
+            for product in self._get_trove_products():
+                title = _clean_name(product["human-name"])
+                self._audit_trove_product(title, product)
+        else:
+            logger.info("Auditing library cache...")
+            for order_id in self.purchase_keys:
+                self._audit_order_id(order_id)
 
     def _get_trove_download_url(self, machine_name, web_name):
         try:
@@ -186,6 +205,34 @@ class DownloadLibrary:
                     rename_str=uploaded_at,
                 )
 
+    def _audit_trove_product(self, title, product):
+        for platform, download in product["downloads"].items():
+            if self._should_download_platform(platform) is False:
+                logger.info(
+                    "Skipping {platform} for {product_title}".format(
+                        platform=platform, product_title=title
+                    )
+                )
+                continue
+
+            web_name = download["url"]["web"].split("/")[-1]
+            if self._should_download_file_by_ext_and_log(web_name) is False:
+                continue
+
+            product_folder = os.path.join(self.library_path, "Humble Trove", title)
+            local_filename = os.path.join(product_folder, web_name)
+            cache_file_key = "trove:{name}".format(name=web_name)
+            file_info = {
+                "uploaded_at": (
+                    download.get("uploaded_at")
+                    or download.get("timestamp")
+                    or product.get("date_added", "0")
+                ),
+                "md5": download.get("md5", "UNKNOWN_MD5"),
+            }
+
+            self._audit_local_file(cache_file_key, local_filename, file_info=file_info)
+
     def _get_trove_products(self):
         trove_products = []
         idx = 0
@@ -212,6 +259,24 @@ class DownloadLibrary:
         return trove_products
 
     def _process_order_id(self, order_id):
+        order = self._get_order_data(order_id)
+        if order is None:
+            return
+        bundle_title = _clean_name(order["product"]["human_name"])
+        logger.info("Checking bundle: " + str(bundle_title))
+        for product in order["subproducts"]:
+            self._process_product(order_id, bundle_title, product)
+
+    def _audit_order_id(self, order_id):
+        order = self._get_order_data(order_id)
+        if order is None:
+            return
+        bundle_title = _clean_name(order["product"]["human_name"])
+        logger.info("Auditing bundle: " + str(bundle_title))
+        for product in order["subproducts"]:
+            self._audit_product(order_id, bundle_title, product)
+
+    def _get_order_data(self, order_id):
         order_url = "https://www.humblebundle.com/api/v1/order/{order_id}?all_tpkds=true".format(
             order_id=order_id
         )
@@ -225,14 +290,10 @@ class DownloadLibrary:
             )
         except Exception:
             logger.error("Failed to get order key {order_id}".format(order_id=order_id))
-            return
+            return None
 
         logger.debug("Order request: {order_r}".format(order_r=order_r))
-        order = order_r.json()
-        bundle_title = _clean_name(order["product"]["human_name"])
-        logger.info("Checking bundle: " + str(bundle_title))
-        for product in order["subproducts"]:
-            self._process_product(order_id, bundle_title, product)
+        return order_r.json()
 
     def _rename_old_file(self, local_filename, append_str):
         # Check if older file exists, if so rename
@@ -550,6 +611,173 @@ class DownloadLibrary:
             open_r.connection.close()
             return True
 
+    def _audit_product(self, order_id, bundle_title, product):
+        product_title = _clean_name(product["human_name"])
+        for download_type in product["downloads"]:
+            if self._should_download_platform(download_type["platform"]) is False:
+                logger.info(
+                    "Skipping {platform} for {product_title}".format(
+                        platform=download_type["platform"], product_title=product_title
+                    )
+                )
+                continue
+
+            product_folder = os.path.join(
+                self.library_path, bundle_title, product_title
+            )
+            for file_type in download_type["download_struct"]:
+                try:
+                    if "url" in file_type and "web" in file_type["url"]:
+                        url = file_type["url"]["web"]
+                        url_filename = url.split("?")[0].split("/")[-1]
+
+                        if (
+                            self._should_download_file_by_ext_and_log(url_filename)
+                            is False
+                        ):
+                            continue
+
+                        cache_file_key = order_id + ":" + url_filename
+                        local_filename = os.path.join(product_folder, url_filename)
+                        self._audit_local_file(
+                            cache_file_key,
+                            local_filename,
+                            remote_url=url,
+                        )
+                    elif "asm_config" in file_type:
+                        game_name = file_type["asm_config"]["display_item"]
+                        local_folder = os.path.join(product_folder, game_name)
+                        asmjs_html_filename = game_name + ".html"
+                        asmjs_local_html_filename = game_name + ".local.html"
+                        cache_file_key = order_id + ":" + asmjs_html_filename
+                        game_asm_name = file_type["asm_manifest"]["asmFile"].split("/")[
+                            2
+                        ]
+                        asmjs_url = (
+                            "https://www.humblebundle.com/play/asmjs/"
+                            + game_asm_name
+                            + "/"
+                            + order_id
+                        )
+
+                        if (
+                            self._should_download_file_by_ext_and_log(
+                                asmjs_html_filename
+                            )
+                            is False
+                        ):
+                            continue
+
+                        local_html_path = os.path.join(
+                            local_folder, asmjs_html_filename
+                        )
+                        self._audit_local_file(
+                            cache_file_key,
+                            local_html_path,
+                            remote_url=asmjs_url,
+                        )
+
+                        local_manifest_source = local_html_path
+                        if os.path.isfile(local_html_path) is False:
+                            local_manifest_source = os.path.join(
+                                local_folder, asmjs_local_html_filename
+                            )
+                        if os.path.isfile(local_manifest_source):
+                            with open(local_manifest_source, "r") as asmjs_html:
+                                asmjs_page = parsel.Selector(text=asmjs_html.read())
+                                asm_player_data_text = asmjs_page.css(
+                                    "#webpack-asm-player-data::text"
+                                ).get()
+                                if not asm_player_data_text:
+                                    logger.info(
+                                        "Skipping asm.js audit for {product_title} (missing manifest data)".format(
+                                            product_title=product_title
+                                        )
+                                    )
+                                    continue
+                                asm_player_data = json.loads(asm_player_data_text)
+                            for local_filename, remote_file in asm_player_data[
+                                "asmOptions"
+                            ]["manifest"].items():
+                                cache_file_key = (
+                                    order_id + ":" + game_name + ":" + local_filename
+                                )
+                                local_file_path = os.path.join(
+                                    local_folder, local_filename
+                                )
+                                self._audit_local_file(
+                                    cache_file_key,
+                                    local_file_path,
+                                    remote_url=remote_file,
+                                )
+                        else:
+                            logger.info(
+                                "Skipping asm.js audit for {product_title} (no local manifest)".format(
+                                    product_title=product_title
+                                )
+                            )
+                    elif "external_link" in file_type:
+                        logger.info(
+                            "External url found: {bundle_title}/{product_title} : {url}".format(
+                                bundle_title=bundle_title,
+                                product_title=product_title,
+                                url=file_type["external_link"],
+                            )
+                        )
+                    else:
+                        logger.info(
+                            "No downloadable url(s) found: {bundle_title}/{product_title}".format(
+                                bundle_title=bundle_title, product_title=product_title
+                            )
+                        )
+                        logger.info(file_type)
+                except Exception:
+                    logger.exception(
+                        "Failed to audit this 'file':\n{file_type}".format(
+                            file_type=file_type
+                        )
+                    )
+
+    def _audit_local_file(
+        self, cache_file_key, local_filename, remote_url=None, file_info=None
+    ):
+        if os.path.isfile(local_filename) is False:
+            return
+
+        if file_info is None:
+            file_info = {}
+
+        if remote_url and self.offline is False:
+            last_modified = self._get_remote_last_modified(remote_url)
+            if last_modified:
+                file_info["url_last_modified"] = last_modified
+
+        if "url_last_modified" not in file_info and "uploaded_at" not in file_info:
+            file_info["url_last_modified"] = datetime.datetime.now().strftime(
+                "%a, %d %b %Y %H:%M:%S %Z"
+            )
+
+        self._update_cache_data(cache_file_key, file_info)
+
+    def _get_remote_last_modified(self, remote_url):
+        try:
+            remote_r = self.session.head(remote_url, allow_redirects=True)
+        except Exception:
+            logger.debug(
+                "Failed to get metadata for {remote_url}".format(
+                    remote_url=remote_url
+                )
+            )
+            return None
+
+        if remote_r.status_code >= 400:
+            remote_r.close()
+            return None
+
+        last_modified = remote_r.headers.get("Last-Modified")
+        remote_r.close()
+        return last_modified
+
     def _download_file(self, product_r, local_filename):
         logger.info(
             "Downloading: {local_filename}".format(local_filename=local_filename)
@@ -632,6 +860,9 @@ class DownloadLibrary:
     def _should_download_file_by_ext(self, filename):
         ext = filename.split(".")[-1]
         return self._should_download_ext(ext)
+
+    def _should_download_file_type(self, filename):
+        return self._should_download_ext(filename)
 
     def _should_download_ext(self, ext):
         ext = ext.lower()

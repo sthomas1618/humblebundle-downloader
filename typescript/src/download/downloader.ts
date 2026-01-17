@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -536,4 +536,184 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
   return {
     processed: results.length,
   };
+};
+
+const fileExists = async (path: string): Promise<boolean> => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const fetchLastModified = async (
+  client: ApiClient,
+  url: string,
+): Promise<string | undefined> => {
+  const headers = new Headers();
+  headers.set("User-Agent", "humblebundle-downloader-ts");
+  if (client.session.cookieHeader) {
+    headers.set("cookie", client.session.cookieHeader);
+  }
+
+  const response = await fetch(url, { method: "HEAD", headers });
+  if (!response.ok) {
+    return undefined;
+  }
+  return response.headers.get("last-modified") ?? undefined;
+};
+
+const auditCacheEntry = async (
+  cache: Record<string, CacheEntry>,
+  cacheKey: string,
+  localPath: string,
+  metadata: CacheEntry,
+): Promise<void> => {
+  if (!(await fileExists(localPath))) {
+    return;
+  }
+  cache[cacheKey] = metadata;
+};
+
+export const auditLibrary = async ({ client, config }: DownloadContext) => {
+  const cache = await loadCache(config.libraryPath);
+  const purchaseKeys =
+    config.purchaseKeys && config.purchaseKeys.length > 0
+      ? config.purchaseKeys
+      : parsePurchaseKeysFromLibraryPage(await client.getLibraryPage());
+
+  if (purchaseKeys.length === 0 && !config.troveOnly) {
+    throw new Error("Unable to determine purchase keys from the library page.");
+  }
+
+  const now = new Date().toUTCString();
+
+  if (config.troveOnly) {
+    const troveProducts = await client.getTroveProducts();
+    for (const product of troveProducts) {
+      const title = cleanName(product["human-name"]);
+      const productFolder = buildTroveFolder(config.libraryPath, title);
+
+      for (const [platform, download] of Object.entries(product.downloads)) {
+        if (!shouldDownloadPlatform(platform, config)) {
+          continue;
+        }
+
+        const filename = getFilenameFromUrl(download.url.web);
+        if (!shouldDownloadExt(filename, config)) {
+          continue;
+        }
+
+        const cacheKey = `trove:${filename}`;
+        const uploadedAt =
+          download.uploaded_at ?? download.timestamp ?? product.date_added ?? "0";
+        const md5 = download.md5 ?? "UNKNOWN_MD5";
+        const localPath = join(productFolder, filename);
+
+        await auditCacheEntry(cache, cacheKey, localPath, {
+          uploadedAt,
+          md5,
+        });
+      }
+    }
+  } else {
+    for (const orderId of purchaseKeys) {
+      const order = await client.getOrderDetails(orderId);
+      const bundleTitle = order.product.human_name;
+
+      for (const product of order.subproducts) {
+        const productFolder = buildProductFolder(
+          config.libraryPath,
+          bundleTitle,
+          product.human_name,
+        );
+
+        for (const downloadType of product.downloads) {
+          if (!shouldDownloadPlatform(downloadType.platform, config)) {
+            continue;
+          }
+
+          for (const fileType of downloadType.download_struct) {
+            if (fileType.url?.web) {
+              const filename = getFilenameFromUrl(fileType.url.web);
+              if (!shouldDownloadExt(filename, config)) {
+                continue;
+              }
+
+              const cacheKey = `${orderId}:${filename}`;
+              const localPath = join(productFolder, filename);
+              if (!(await fileExists(localPath))) {
+                continue;
+              }
+              const lastModified = config.offlineAudit
+                ? undefined
+                : await fetchLastModified(client, fileType.url.web);
+
+              cache[cacheKey] = {
+                urlLastModified: lastModified ?? now,
+              };
+              continue;
+            }
+
+            if (fileType.asm_config) {
+              const gameName = fileType.asm_config.display_item;
+              const asmFile = fileType.asm_manifest?.asmFile;
+              if (!gameName || !asmFile) {
+                continue;
+              }
+
+              const localFolder = join(productFolder, gameName);
+              const asmFilename = `${gameName}.html`;
+              const asmLocalFilename = `${gameName}.local.html`;
+              const asmCacheKey = `${orderId}:${asmFilename}`;
+              const asmPath = join(localFolder, asmFilename);
+              if (await fileExists(asmPath)) {
+                const lastModified = config.offlineAudit
+                  ? undefined
+                  : await fetchLastModified(
+                      client,
+                      `https://www.humblebundle.com/play/asmjs/${asmFile.split("/")[2] ?? asmFile}/${orderId}`,
+                    );
+                cache[asmCacheKey] = {
+                  urlLastModified: lastModified ?? now,
+                };
+              }
+
+              let html = "";
+              if (await fileExists(asmPath)) {
+                html = await readFile(asmPath, "utf-8");
+              } else {
+                const localHtmlPath = join(localFolder, asmLocalFilename);
+                if (await fileExists(localHtmlPath)) {
+                  html = await readFile(localHtmlPath, "utf-8");
+                }
+              }
+
+              const manifest = html ? parseAsmPlayerData(html) : null;
+              if (!manifest) {
+                continue;
+              }
+
+              for (const [localFilename, remoteFile] of Object.entries(manifest)) {
+                const cacheKey = `${orderId}:${gameName}:${localFilename}`;
+                const localPath = join(localFolder, localFilename);
+                if (!(await fileExists(localPath))) {
+                  continue;
+                }
+                const fileLastModified = config.offlineAudit
+                  ? undefined
+                  : await fetchLastModified(client, remoteFile);
+                cache[cacheKey] = {
+                  urlLastModified: fileLastModified ?? now,
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  await saveCache(config.libraryPath, cache);
 };
