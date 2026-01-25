@@ -80,6 +80,22 @@ updated content.
 
 - Inside your library folder a file named `.cache.json` is saved and keeps track of the files that have been downloaded.
   This way running the download command again pointing to the same directory will only download new or updated files.
+- The `.cache.json` file lives at the root of your library directory and stores a JSON object keyed by download identifiers.
+  Humble Trove entries use `trove:<web_name>` keys, while bundle/library downloads use `<order_id>:<filename>` keys.
+  Trove entries store `uploaded_at` and `md5`, and standard downloads store `url_last_modified` (from the HTTP
+  Last-Modified header or set to the current time if missing). Example:
+
+  ```json
+  {
+    "trove:into_the_breach": {
+      "uploaded_at": "2018-02-27T00:00:00Z",
+      "md5": "4d186321c1a7f0f354b297e8914ab240"
+    },
+    "ABCDEF123456:game.exe": {
+      "url_last_modified": "2024-01-15T12:34:56Z"
+    }
+  }
+  ```
 - Use `--help` with all `hbd` commands to see available options
 - Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
   and look under the **Platform** dropdown
