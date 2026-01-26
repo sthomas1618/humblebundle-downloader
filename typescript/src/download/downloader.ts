@@ -507,10 +507,7 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-async function fetchLastModified(
-  client: ApiClient,
-  url: string
-): Promise<string | undefined> {
+async function fetchLastModified(client: ApiClient, url: string): Promise<string | undefined> {
   const headers = new Headers()
   headers.set('User-Agent', 'humblebundle-downloader-ts')
   if (client.session.cookieHeader) {

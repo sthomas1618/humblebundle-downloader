@@ -9,10 +9,7 @@ import yauzl from 'yauzl'
 
 import { pdf2cbzTestUtils } from '../src/tools/pdf2cbz'
 
-async function readZipEntry(
-  zipPath: string,
-  entryName: string
-): Promise<Buffer | undefined> {
+async function readZipEntry(zipPath: string, entryName: string): Promise<Buffer | undefined> {
   return await new Promise((resolve, reject) => {
     yauzl.open(zipPath, { lazyEntries: true }, (error, zipfile) => {
       if (error || !zipfile) {
@@ -63,9 +60,7 @@ async function readZipEntry(
 
 describe('pdf2cbz naming and preservation helpers', () => {
   it('natural sorts and normalizes entry names', () => {
-    const sorted = ['page-2.png', 'page-10.png', 'page-1.png'].sort(
-      pdf2cbzTestUtils.naturalSort
-    )
+    const sorted = ['page-2.png', 'page-10.png', 'page-1.png'].sort(pdf2cbzTestUtils.naturalSort)
     expect(sorted).toEqual(['page-1.png', 'page-2.png', 'page-10.png'])
     expect(pdf2cbzTestUtils.normalizeEntryName(1, '.JPG')).toBe('0001.jpg')
     expect(pdf2cbzTestUtils.normalizeEntryName(12, '.png')).toBe('0012.png')
