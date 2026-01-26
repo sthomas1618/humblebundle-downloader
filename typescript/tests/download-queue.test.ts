@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import path from 'node:path'
 
 import { downloadQueue } from '../src/download/downloader'
 
@@ -13,8 +13,8 @@ describe('downloadQueue', () => {
   })
 
   it('retries failed downloads and writes the file', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'hbd-download-'))
-    const destination = join(tempDir, 'file.txt')
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const destination = path.join(temporaryDirectory, 'file.txt')
     let callCount = 0
 
     globalThis.fetch = async () => {
@@ -41,10 +41,10 @@ describe('downloadQueue', () => {
       expect(results[0]?.attempts).toBe(2)
       expect(results[0]?.bytesWritten).toBe(5)
 
-      const contents = await readFile(destination, 'utf-8')
+      const contents = await readFile(destination, 'utf8')
       expect(contents).toBe('hello')
     } finally {
-      await rm(tempDir, { recursive: true, force: true })
+      await rm(temporaryDirectory, { recursive: true, force: true })
     }
   })
 })

@@ -1,7 +1,7 @@
 import { createWriteStream } from 'node:fs'
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
+import path from 'node:path'
 
 import type { ApiClient } from '../api/client'
 import type { AppConfig } from '../config'
@@ -35,23 +35,11 @@ export type DownloadResult = {
   lastModified?: string
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
-const formatBytes = (bytes: number): string => {
-  if (bytes < 1024) {
-    return `${bytes} B`
-  }
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let unitIndex = -1
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  return `${value.toFixed(1)} ${units[unitIndex]}`
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-const reportProgress = (label: string, transferred: number, total?: number) => {
+function reportProgress(label: string, transferred: number, total?: number): void {
   if (typeof total === 'number' && total > 0) {
     const barWidth = 50
     const done = Math.min(barWidth, Math.floor((transferred / total) * barWidth))
@@ -64,10 +52,10 @@ const reportProgress = (label: string, transferred: number, total?: number) => {
   }
 }
 
-const downloadToFile = async (
+async function downloadToFile(
   item: DownloadItem,
   showProgress: boolean
-): Promise<{ bytesWritten: number; skipped?: boolean; lastModified?: string }> => {
+): Promise<{ bytesWritten: number; skipped?: boolean; lastModified?: string }> {
   const response = await fetch(item.url)
   if (!response.ok) {
     throw new Error(`Failed to download ${item.url}: ${response.status}`)
@@ -80,12 +68,12 @@ const downloadToFile = async (
     return { bytesWritten: 0, skipped: true, lastModified }
   }
 
-  await mkdir(dirname(item.destination), { recursive: true })
+  await mkdir(path.dirname(item.destination), { recursive: true })
   const output = createWriteStream(item.destination)
 
   const expectedBytes = item.expectedSize ?? totalBytes
   const label = item.label ?? item.destination
-  const hash = item.expectedMd5 ? createHash('md5') : null
+  const hash = item.expectedMd5 ? createHash('md5') : undefined
 
   let written = 0
   const reader = response.body?.getReader()
@@ -93,10 +81,12 @@ const downloadToFile = async (
     throw new Error(`No response body for ${item.url}`)
   }
 
-  while (true) {
+  let isReading = true
+  while (isReading) {
     const { done, value } = await reader.read()
     if (done) {
-      break
+      isReading = false
+      continue
     }
 
     if (value) {
@@ -134,12 +124,12 @@ const downloadToFile = async (
   return { bytesWritten: written, lastModified }
 }
 
-const downloadWithRetry = async (
+async function downloadWithRetry(
   item: DownloadItem,
   showProgress: boolean,
   maxAttempts = 3,
   baseDelayMs = 1000
-): Promise<DownloadResult> => {
+): Promise<DownloadResult> {
   let attempt = 0
 
   while (attempt < maxAttempts) {
@@ -165,58 +155,60 @@ const downloadWithRetry = async (
   return { item, bytesWritten: 0, attempts: attempt }
 }
 
-export const shouldDownloadPlatform = (platform: string, config: AppConfig): boolean => {
+export function shouldDownloadPlatform(platform: string, config: AppConfig): boolean {
   if (!config.platformInclude || config.platformInclude.length === 0) {
     return true
   }
-  const normalized = config.platformInclude.map((value) => value.toLowerCase())
-  if (normalized.includes('all')) {
+  const normalized = new Set(config.platformInclude.map((value) => value.toLowerCase()))
+  if (normalized.has('all')) {
     return true
   }
-  return normalized.includes(platform.toLowerCase())
+  return normalized.has(platform.toLowerCase())
 }
 
-export const shouldDownloadExt = (filename: string, config: AppConfig): boolean => {
-  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+export function shouldDownloadExtension(filename: string, config: AppConfig): boolean {
+  const extension = filename.split('.').pop()?.toLowerCase() ?? ''
   if (config.extInclude && config.extInclude.length > 0) {
-    return config.extInclude.map((value) => value.toLowerCase()).includes(ext)
+    const normalizedInclude = new Set(config.extInclude.map((value) => value.toLowerCase()))
+    return normalizedInclude.has(extension)
   }
   if (config.extExclude && config.extExclude.length > 0) {
-    return !config.extExclude.map((value) => value.toLowerCase()).includes(ext)
+    const normalizedExclude = new Set(config.extExclude.map((value) => value.toLowerCase()))
+    return !normalizedExclude.has(extension)
   }
   return true
 }
 
-const getFilenameFromUrl = (url: string): string => {
+function getFilenameFromUrl(url: string): string {
   const withoutQuery = url.split('?')[0] ?? url
   const parts = withoutQuery.split('/')
-  return parts[parts.length - 1] ?? cleanName(url)
+  return parts.at(-1) ?? cleanName(url)
 }
 
 type AsmManifest = Record<string, string>
 
-const parseAsmPlayerData = (html: string): AsmManifest | null => {
+function parseAsmPlayerData(html: string): AsmManifest | undefined {
   const match = html.match(/id=["']webpack-asm-player-data["'][^>]*>([^<]+)<\/[^>]+>/i)
 
   if (!match) {
-    return null
+    return undefined
   }
 
   try {
     const parsed = JSON.parse(match[1]) as {
       asmOptions?: { manifest?: Record<string, string> }
     }
-    return parsed.asmOptions?.manifest ?? null
+    return parsed.asmOptions?.manifest
   } catch {
-    return null
+    return undefined
   }
 }
 
-const writeLocalAsmHtml = async (
+async function writeLocalAsmHtml(
   localPath: string,
   html: string,
   manifest: AsmManifest
-): Promise<void> => {
+): Promise<void> {
   let output = html
   for (const [localFilename, remoteFile] of Object.entries(manifest)) {
     output = output.replaceAll(
@@ -228,18 +220,20 @@ const writeLocalAsmHtml = async (
   await writeFile(localPath, output)
 }
 
-export const formatExternalLinkMessage = (
+export function formatExternalLinkMessage(
   bundleTitle: string,
   productTitle: string,
   url: string
-): string => `External link found: ${bundleTitle}/${productTitle} : ${url}`
+): string {
+  return `External link found: ${bundleTitle}/${productTitle} : ${url}`
+}
 
-export const buildTroveDownloadItems = async (
+export async function buildTroveDownloadItems(
   products: Awaited<ReturnType<ApiClient['getTroveProducts']>>,
   config: AppConfig,
   cache: Record<string, CacheEntry>,
   signDownload: ApiClient['signTroveDownload']
-): Promise<DownloadItem[]> => {
+): Promise<DownloadItem[]> {
   const items: DownloadItem[] = []
 
   for (const product of products) {
@@ -252,7 +246,7 @@ export const buildTroveDownloadItems = async (
       }
 
       const filename = getFilenameFromUrl(download.url.web)
-      if (!shouldDownloadExt(filename, config)) {
+      if (!shouldDownloadExtension(filename, config)) {
         continue
       }
 
@@ -281,7 +275,7 @@ export const buildTroveDownloadItems = async (
 
       items.push({
         url: sign.signed_url,
-        destination: join(productFolder, filename),
+        destination: path.join(productFolder, filename),
         label: filename,
         expectedMd5: md5,
         cacheKey,
@@ -297,10 +291,10 @@ export const buildTroveDownloadItems = async (
   return items
 }
 
-export const downloadQueue = async (
+export async function downloadQueue(
   items: DownloadItem[],
   showProgress: boolean
-): Promise<DownloadResult[]> => {
+): Promise<DownloadResult[]> {
   const results: DownloadResult[] = []
 
   for (const item of items) {
@@ -317,7 +311,7 @@ export const downloadQueue = async (
  * This currently exercises the download queue and integrity checks while the
  * purchase/product orchestration is still being ported.
  */
-export const parsePurchaseKeysFromLibraryPage = (html: string): string[] => {
+export function parsePurchaseKeysFromLibraryPage(html: string): string[] {
   const match = html.match(/id=["']user-home-json-data["'][^>]*>([^<]+)<\/[^>]+>/i)
 
   if (!match) {
@@ -337,7 +331,7 @@ export const parsePurchaseKeysFromLibraryPage = (html: string): string[] => {
   }
 }
 
-export const downloadLibrary = async ({ client, config }: DownloadContext) => {
+export async function downloadLibrary({ client, config }: DownloadContext) {
   const cache = await loadCache(config.libraryPath)
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -375,7 +369,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
           for (const fileType of downloadType.download_struct) {
             if (fileType.url?.web) {
               const filename = getFilenameFromUrl(fileType.url.web)
-              if (!shouldDownloadExt(filename, config)) {
+              if (!shouldDownloadExtension(filename, config)) {
                 continue
               }
 
@@ -387,7 +381,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
 
               items.push({
                 url: fileType.url.web,
-                destination: join(productFolder, filename),
+                destination: path.join(productFolder, filename),
                 label: filename,
                 expectedSize: fileType.file_size,
                 expectedMd5: fileType.md5,
@@ -414,7 +408,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
                 continue
               }
 
-              const localFolder = join(productFolder, gameName)
+              const localFolder = path.join(productFolder, gameName)
               await mkdir(localFolder, { recursive: true })
 
               const asmFilename = `${gameName}.html`
@@ -426,7 +420,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
               let lastModified: string | undefined
               if (asmCacheEntry && !config.updateOnly) {
                 try {
-                  html = await readFile(join(localFolder, asmFilename), 'utf-8')
+                  html = await readFile(path.join(localFolder, asmFilename), 'utf8')
                 } catch {
                   html = ''
                 }
@@ -444,7 +438,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
                 }
                 lastModified = response.headers.get('last-modified') ?? undefined
                 html = await response.text()
-                await writeFile(join(localFolder, asmFilename), html)
+                await writeFile(path.join(localFolder, asmFilename), html)
                 cache[asmCacheKey] = {
                   urlLastModified: lastModified ?? new Date().toUTCString(),
                 }
@@ -456,7 +450,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
                 continue
               }
 
-              await writeLocalAsmHtml(join(localFolder, asmLocalFilename), html, manifest)
+              await writeLocalAsmHtml(path.join(localFolder, asmLocalFilename), html, manifest)
 
               for (const [localFilename, remoteFile] of Object.entries(manifest)) {
                 const cacheKey = `${orderId}:${gameName}:${localFilename}`
@@ -467,7 +461,7 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
 
                 items.push({
                   url: remoteFile,
-                  destination: join(localFolder, localFilename),
+                  destination: path.join(localFolder, localFilename),
                   label: localFilename,
                   cacheKey,
                   cacheEntry,
@@ -504,16 +498,19 @@ export const downloadLibrary = async ({ client, config }: DownloadContext) => {
   }
 }
 
-const fileExists = async (path: string): Promise<boolean> => {
+async function fileExists(filePath: string): Promise<boolean> {
   try {
-    await access(path)
+    await access(filePath)
     return true
   } catch {
     return false
   }
 }
 
-const fetchLastModified = async (client: ApiClient, url: string): Promise<string | undefined> => {
+async function fetchLastModified(
+  client: ApiClient,
+  url: string
+): Promise<string | undefined> {
   const headers = new Headers()
   headers.set('User-Agent', 'humblebundle-downloader-ts')
   if (client.session.cookieHeader) {
@@ -527,19 +524,19 @@ const fetchLastModified = async (client: ApiClient, url: string): Promise<string
   return response.headers.get('last-modified') ?? undefined
 }
 
-const auditCacheEntry = async (
+async function auditCacheEntry(
   cache: Record<string, CacheEntry>,
   cacheKey: string,
   localPath: string,
   metadata: CacheEntry
-): Promise<void> => {
+): Promise<void> {
   if (!(await fileExists(localPath))) {
     return
   }
   cache[cacheKey] = metadata
 }
 
-export const auditLibrary = async ({ client, config }: DownloadContext) => {
+export async function auditLibrary({ client, config }: DownloadContext) {
   const cache = await loadCache(config.libraryPath)
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -564,14 +561,14 @@ export const auditLibrary = async ({ client, config }: DownloadContext) => {
         }
 
         const filename = getFilenameFromUrl(download.url.web)
-        if (!shouldDownloadExt(filename, config)) {
+        if (!shouldDownloadExtension(filename, config)) {
           continue
         }
 
         const cacheKey = `trove:${filename}`
         const uploadedAt = download.uploaded_at ?? download.timestamp ?? product.date_added ?? '0'
         const md5 = download.md5 ?? 'UNKNOWN_MD5'
-        const localPath = join(productFolder, filename)
+        const localPath = path.join(productFolder, filename)
 
         await auditCacheEntry(cache, cacheKey, localPath, {
           uploadedAt,
@@ -599,12 +596,12 @@ export const auditLibrary = async ({ client, config }: DownloadContext) => {
           for (const fileType of downloadType.download_struct) {
             if (fileType.url?.web) {
               const filename = getFilenameFromUrl(fileType.url.web)
-              if (!shouldDownloadExt(filename, config)) {
+              if (!shouldDownloadExtension(filename, config)) {
                 continue
               }
 
               const cacheKey = `${orderId}:${filename}`
-              const localPath = join(productFolder, filename)
+              const localPath = path.join(productFolder, filename)
               if (!(await fileExists(localPath))) {
                 continue
               }
@@ -625,11 +622,11 @@ export const auditLibrary = async ({ client, config }: DownloadContext) => {
                 continue
               }
 
-              const localFolder = join(productFolder, gameName)
+              const localFolder = path.join(productFolder, gameName)
               const asmFilename = `${gameName}.html`
               const asmLocalFilename = `${gameName}.local.html`
               const asmCacheKey = `${orderId}:${asmFilename}`
-              const asmPath = join(localFolder, asmFilename)
+              const asmPath = path.join(localFolder, asmFilename)
               if (await fileExists(asmPath)) {
                 const lastModified = config.offlineAudit
                   ? undefined
@@ -644,22 +641,22 @@ export const auditLibrary = async ({ client, config }: DownloadContext) => {
 
               let html = ''
               if (await fileExists(asmPath)) {
-                html = await readFile(asmPath, 'utf-8')
+                html = await readFile(asmPath, 'utf8')
               } else {
-                const localHtmlPath = join(localFolder, asmLocalFilename)
+                const localHtmlPath = path.join(localFolder, asmLocalFilename)
                 if (await fileExists(localHtmlPath)) {
-                  html = await readFile(localHtmlPath, 'utf-8')
+                  html = await readFile(localHtmlPath, 'utf8')
                 }
               }
 
-              const manifest = html ? parseAsmPlayerData(html) : null
+              const manifest = html ? parseAsmPlayerData(html) : undefined
               if (!manifest) {
                 continue
               }
 
               for (const [localFilename, remoteFile] of Object.entries(manifest)) {
                 const cacheKey = `${orderId}:${gameName}:${localFilename}`
-                const localPath = join(localFolder, localFilename)
+                const localPath = path.join(localFolder, localFilename)
                 if (!(await fileExists(localPath))) {
                   continue
                 }

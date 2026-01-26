@@ -3,6 +3,10 @@ import { describe, expect, it } from 'bun:test'
 import { buildTroveDownloadItems, type DownloadItem } from '../src/download/downloader'
 import { resolveConfig } from '../src/config'
 
+async function signDownload(): Promise<{ signed_url: string }> {
+  return { signed_url: 'https://signed' }
+}
+
 describe('buildTroveDownloadItems', () => {
   it('builds signed trove download items with cache metadata', async () => {
     const config = resolveConfig({
@@ -24,7 +28,6 @@ describe('buildTroveDownloadItems', () => {
       },
     ]
 
-    const signDownload = async () => ({ signed_url: 'https://signed' })
     const items = await buildTroveDownloadItems(products, config, {}, signDownload)
 
     expect(items).toHaveLength(1)

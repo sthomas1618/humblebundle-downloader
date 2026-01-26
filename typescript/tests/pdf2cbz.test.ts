@@ -1,7 +1,7 @@
 import { createWriteStream } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import path from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 import { ZipFile } from 'yazl'
@@ -9,7 +9,10 @@ import yauzl from 'yauzl'
 
 import { pdf2cbzTestUtils } from '../src/tools/pdf2cbz'
 
-const readZipEntry = async (zipPath: string, entryName: string): Promise<Buffer | undefined> => {
+async function readZipEntry(
+  zipPath: string,
+  entryName: string
+): Promise<Buffer | undefined> {
   return await new Promise((resolve, reject) => {
     yauzl.open(zipPath, { lazyEntries: true }, (error, zipfile) => {
       if (error || !zipfile) {
@@ -17,10 +20,12 @@ const readZipEntry = async (zipPath: string, entryName: string): Promise<Buffer 
         return
       }
 
-      const handleClose = () => zipfile.close()
-      zipfile.on('error', (err) => {
+      function handleClose(): void {
+        zipfile.close()
+      }
+      zipfile.on('error', (error_) => {
         handleClose()
-        reject(err)
+        reject(error_)
       })
 
       zipfile.readEntry()
@@ -34,9 +39,9 @@ const readZipEntry = async (zipPath: string, entryName: string): Promise<Buffer 
             }
             const chunks: Buffer[] = []
             stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-            stream.on('error', (streamErr) => {
+            stream.on('error', (streamError_) => {
               handleClose()
-              reject(streamErr)
+              reject(streamError_)
             })
             stream.on('end', () => {
               handleClose()
@@ -50,7 +55,7 @@ const readZipEntry = async (zipPath: string, entryName: string): Promise<Buffer 
 
       zipfile.on('end', () => {
         handleClose()
-        resolve(undefined)
+        resolve()
       })
     })
   })
@@ -67,8 +72,8 @@ describe('pdf2cbz naming and preservation helpers', () => {
   })
 
   it('extracts ComicInfo.xml from an existing CBZ', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'hbd-pdf2cbz-test-'))
-    const cbzPath = join(tempDir, 'sample.cbz')
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-pdf2cbz-test-'))
+    const cbzPath = path.join(temporaryDirectory, 'sample.cbz')
     const comicInfo = Buffer.from('<ComicInfo><Title>Sample</Title></ComicInfo>')
 
     try {
@@ -85,7 +90,7 @@ describe('pdf2cbz naming and preservation helpers', () => {
       const extracted = await pdf2cbzTestUtils.readComicInfoXml(cbzPath)
       expect(extracted?.toString()).toBe(comicInfo.toString())
 
-      const regeneratedPath = join(tempDir, 'regenerated.cbz')
+      const regeneratedPath = path.join(temporaryDirectory, 'regenerated.cbz')
       await new Promise<void>((resolve, reject) => {
         const zip = new ZipFile()
         const output = createWriteStream(regeneratedPath)
@@ -99,7 +104,7 @@ describe('pdf2cbz naming and preservation helpers', () => {
       const regenerated = await readZipEntry(regeneratedPath, 'ComicInfo.xml')
       expect(regenerated?.toString()).toBe(comicInfo.toString())
     } finally {
-      await rm(tempDir, { recursive: true, force: true })
+      await rm(temporaryDirectory, { recursive: true, force: true })
     }
   })
 })

@@ -11,8 +11,8 @@ export type Session = {
   cookieHeader?: string
 }
 
-const parseCookieFile = async (cookieFile: string): Promise<string | undefined> => {
-  const content = await readFile(cookieFile, 'utf-8')
+async function parseCookieFile(cookieFile: string): Promise<string | undefined> {
+  const content = await readFile(cookieFile, 'utf8')
   const lines = content.split(/\r?\n/)
   const cookies: string[] = []
 
@@ -26,7 +26,9 @@ const parseCookieFile = async (cookieFile: string): Promise<string | undefined> 
       continue
     }
 
-    const [domain, , , , , name, value] = parts
+    const domain = parts[0]
+    const name = parts[5]
+    const value = parts[6]
     if (domain && !domain.includes('humblebundle.com')) {
       continue
     }
@@ -49,7 +51,7 @@ const parseCookieFile = async (cookieFile: string): Promise<string | undefined> 
  *
  * @param config - Normalized application configuration.
  */
-export const createSession = async (config: AppConfig): Promise<Session> => {
+export async function createSession(config: AppConfig): Promise<Session> {
   const cookieHeader = config.cookieFile
     ? await parseCookieFile(config.cookieFile)
     : config.sessionAuth

@@ -63,7 +63,7 @@ export type ApiClient = {
   signTroveDownload: (machineName: string, filename: string) => Promise<TroveSignResponse>
 }
 
-const buildHeaders = (session: Session, initHeaders?: HeadersInit): HeadersInit => {
+function buildHeaders(session: Session, initHeaders?: HeadersInit): HeadersInit {
   const headers = new Headers(initHeaders)
   headers.set('User-Agent', 'humblebundle-downloader-ts')
 
@@ -78,8 +78,8 @@ const buildHeaders = (session: Session, initHeaders?: HeadersInit): HeadersInit 
  * Build an API client instance that can be expanded with authenticated
  * requests once cookie handling is implemented.
  */
-export const createClient = (session: Session): ApiClient => {
-  const fetchJson = async <T>(url: string, init?: RequestInit): Promise<T> => {
+export function createClient(session: Session): ApiClient {
+  async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const response = await fetch(url, {
       ...init,
       headers: buildHeaders(session, init?.headers),
@@ -92,7 +92,7 @@ export const createClient = (session: Session): ApiClient => {
     return (await response.json()) as T
   }
 
-  const fetchText = async (url: string, init?: RequestInit): Promise<string> => {
+  async function fetchText(url: string, init?: RequestInit): Promise<string> {
     const response = await fetch(url, {
       ...init,
       headers: buildHeaders(session, init?.headers),
@@ -105,25 +105,30 @@ export const createClient = (session: Session): ApiClient => {
     return response.text()
   }
 
-  const getLibraryPage = async (): Promise<string> => fetchText(`${BASE_URL}/home/library`)
+  async function getLibraryPage(): Promise<string> {
+    return fetchText(`${BASE_URL}/home/library`)
+  }
 
-  const getOrderDetails = async (orderId: string): Promise<OrderResponse> =>
-    fetchJson<OrderResponse>(`${BASE_URL}/api/v1/order/${orderId}?all_tpkds=true`, {
+  async function getOrderDetails(orderId: string): Promise<OrderResponse> {
+    return fetchJson<OrderResponse>(`${BASE_URL}/api/v1/order/${orderId}?all_tpkds=true`, {
       headers: {
         'content-type': 'application/json',
         'content-encoding': 'gzip',
       },
     })
+  }
 
-  const getTroveProducts = async (): Promise<TroveProduct[]> => {
+  async function getTroveProducts(): Promise<TroveProduct[]> {
     const products: TroveProduct[] = []
     let index = 0
+    let hasMore = true
 
-    while (true) {
+    while (hasMore) {
       const page = await fetchJson<TroveProduct[]>(`${BASE_URL}/client/catalog?index=${index}`)
 
       if (page.length === 0) {
-        break
+        hasMore = false
+        continue
       }
 
       products.push(...page)
@@ -133,10 +138,10 @@ export const createClient = (session: Session): ApiClient => {
     return products
   }
 
-  const signTroveDownload = async (
+  async function signTroveDownload(
     machineName: string,
     filename: string
-  ): Promise<TroveSignResponse> => {
+  ): Promise<TroveSignResponse> {
     const form = new URLSearchParams({
       machine_name: machineName,
       filename,
