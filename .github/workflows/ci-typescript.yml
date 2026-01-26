@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - 'typescript/**'
+      - '.github/workflows/ci-typescript.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'typescript/**'
+      - '.github/workflows/ci-typescript.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: '1.1.24'
+      - name: Install dependencies
+        run: bun install
+      - name: Run tests
+        run: bun test
+      - name: Run lint
+        run: bun run lint
+      - name: Check formatting
+        run: bun run format:check
