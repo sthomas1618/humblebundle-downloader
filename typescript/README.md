@@ -64,6 +64,33 @@ bun run hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"
 
 Add `--offline` to skip remote metadata lookups during audit runs.
 
+## PDF → CBZ conversion
+
+The TypeScript CLI includes a `pdf2cbz` command to convert comic PDFs into CBZ archives.
+When a PDF changes (mtime/size), the cache entry under `transforms.pdf.cbz` is refreshed and
+the CBZ is regenerated.
+
+```bash
+bun run hbd pdf2cbz "./library/**/*.pdf"
+```
+
+Use `--dry-run` to preview actions without writing CBZs or touching the cache.
+If a CBZ is regenerated, any existing `ComicInfo.xml` stored at the archive root is preserved
+and re-injected into the new CBZ.
+
+Example workflow:
+
+```bash
+# First run: generates CBZs and writes cache entries
+bun run hbd pdf2cbz "./library/**/*.pdf"
+
+# Second run: cache hit, skips unchanged PDFs
+bun run hbd pdf2cbz "./library/**/*.pdf"
+
+# If the PDF changes: logs regeneration and updates cache
+bun run hbd pdf2cbz "./library/**/*.pdf"
+```
+
 You can also use the CLI entrypoint directly if you prefer:
 
 ```bash

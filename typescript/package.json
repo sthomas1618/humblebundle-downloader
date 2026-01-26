@@ -26,10 +26,14 @@
     "test": "bun test"
   },
   "dependencies": {
-    "commander": "^11.1.0"
+    "commander": "^11.1.0",
+    "yauzl": "^2.10.0",
+    "yazl": "^2.5.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
+    "@types/yauzl": "^2.10.2",
+    "@types/yazl": "^2.4.6",
     "@typescript-eslint/eslint-plugin": "^8.31.0",
     "@typescript-eslint/parser": "^8.31.0",
     "bun-types": "^1.1.39",
