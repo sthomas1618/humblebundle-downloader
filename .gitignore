@@ -3,3 +3,4 @@ __pycache__
 *cookies.txt
 .tox/
 .ruff_cache/
+typescript/node_modules/
