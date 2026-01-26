@@ -43,10 +43,11 @@ type ConfigOverrides = {
 /**
  * Resolve CLI and environment overrides into a full AppConfig object.
  */
-export const resolveConfig = (overrides: ConfigOverrides): AppConfig => {
-  const normalize = (values?: string[]): string[] | undefined =>
-    values?.map((value) => value.toLowerCase())
+function normalizeValues(values?: string[]): string[] | undefined {
+  return values?.map((value) => value.toLowerCase())
+}
 
+export function resolveConfig(overrides: ConfigOverrides): AppConfig {
   return {
     cookieFile: overrides.cookieFile,
     sessionAuth: overrides.sessionAuth,
@@ -54,9 +55,9 @@ export const resolveConfig = (overrides: ConfigOverrides): AppConfig => {
     troveOnly: overrides.troveOnly ?? false,
     showProgress: overrides.showProgress ?? false,
     updateOnly: overrides.updateOnly ?? false,
-    platformInclude: normalize(overrides.platformInclude),
-    extInclude: normalize(overrides.extInclude),
-    extExclude: normalize(overrides.extExclude),
+    platformInclude: normalizeValues(overrides.platformInclude),
+    extInclude: normalizeValues(overrides.extInclude),
+    extExclude: normalizeValues(overrides.extExclude),
     purchaseKeys: overrides.purchaseKeys,
     offlineAudit: overrides.offlineAudit ?? false,
   }

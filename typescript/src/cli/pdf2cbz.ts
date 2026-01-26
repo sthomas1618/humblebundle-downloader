@@ -12,19 +12,21 @@ type Pdf2CbzOptions = {
   render?: boolean
 }
 
-const commandExists = async (command: string): Promise<boolean> => {
+async function commandExists(command: string): Promise<boolean> {
   const isWindows = process.platform === 'win32'
   const shell = isWindows ? 'cmd' : 'sh'
-  const args = isWindows ? ['/c', `where ${command}`] : ['-c', `command -v ${command}`]
+  const commandArguments = isWindows
+    ? ['/c', `where ${command}`]
+    : ['-c', `command -v ${command}`]
 
   return await new Promise<boolean>((resolve) => {
-    const child = spawn(shell, args, { stdio: 'ignore' })
+    const child = spawn(shell, commandArguments, { stdio: 'ignore' })
     child.on('error', () => resolve(false))
     child.on('close', (code) => resolve(code === 0))
   })
 }
 
-const buildDependencyMessage = (command: string): string => {
+function buildDependencyMessage(command: string): string {
   return [
     `Missing dependency: ${command}`,
     'Install hints:',
@@ -34,7 +36,7 @@ const buildDependencyMessage = (command: string): string => {
   ].join('\n')
 }
 
-const assertDependencies = async (options: Pdf2CbzOptions, program: Command): Promise<void> => {
+async function assertDependencies(options: Pdf2CbzOptions, program: Command): Promise<void> {
   const hasPdfImages = await commandExists('pdfimages')
   if (!hasPdfImages) {
     program.error(buildDependencyMessage('pdfimages'), { exitCode: 1 })
@@ -48,7 +50,7 @@ const assertDependencies = async (options: Pdf2CbzOptions, program: Command): Pr
   }
 }
 
-export const registerPdf2CbzCommand = (program: Command): void => {
+export function registerPdf2CbzCommand(program: Command): void {
   program
     .command('pdf2cbz')
     .description('Convert comic PDFs into CBZ archives')

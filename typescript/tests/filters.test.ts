@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import { resolveConfig } from '../src/config'
-import { shouldDownloadExt, shouldDownloadPlatform } from '../src/download/downloader'
+import { shouldDownloadExtension, shouldDownloadPlatform } from '../src/download/downloader'
 
 describe('download filters', () => {
   it('allows all platforms when no filter is set', () => {
@@ -16,13 +16,13 @@ describe('download filters', () => {
 
   it('filters extensions by include list', () => {
     const config = resolveConfig({ extInclude: ['pdf'] })
-    expect(shouldDownloadExt('file.pdf', config)).toBe(true)
-    expect(shouldDownloadExt('file.zip', config)).toBe(false)
+    expect(shouldDownloadExtension('file.pdf', config)).toBe(true)
+    expect(shouldDownloadExtension('file.zip', config)).toBe(false)
   })
 
   it('filters extensions by exclude list', () => {
     const config = resolveConfig({ extExclude: ['zip'] })
-    expect(shouldDownloadExt('file.zip', config)).toBe(false)
-    expect(shouldDownloadExt('file.pdf', config)).toBe(true)
+    expect(shouldDownloadExtension('file.zip', config)).toBe(false)
+    expect(shouldDownloadExtension('file.pdf', config)).toBe(true)
   })
 })
