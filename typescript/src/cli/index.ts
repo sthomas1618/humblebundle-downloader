@@ -5,6 +5,7 @@ import { createSession } from '../auth/session'
 import { createClient } from '../api/client'
 import { resolveConfig } from '../config'
 import { auditLibrary, downloadLibrary } from '../download/downloader'
+import { registerPdf2CbzCommand } from './pdf2cbz'
 
 const program = new Command()
 
@@ -106,6 +107,8 @@ const configureCli = () => {
       config,
     })
   })
+
+  registerPdf2CbzCommand(program)
 }
 
 configureCli()
