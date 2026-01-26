@@ -39,8 +39,8 @@ const CACHE_FILE = '.cache.json'
 
 function defaultPdfCbzCache(): PdfCbzCache {
   return {
-  version: 1,
-  entries: {},
+    version: 1,
+    entries: {},
   }
 }
 
@@ -69,25 +69,16 @@ function normalizeCache(data: unknown): CacheData {
     const updatedPdf = pdfTransforms
       ? { ...pdfTransforms, cbz: mergePdfCbzCaches(existing) }
       : { cbz: mergePdfCbzCaches(existing) }
-    cache.transforms = transforms
-      ? { ...transforms, pdf: updatedPdf }
-      : { pdf: updatedPdf }
+    cache.transforms = transforms ? { ...transforms, pdf: updatedPdf } : { pdf: updatedPdf }
   }
   return cache
 }
 
-export function getPdfCbzEntry(
-  cache: CacheData,
-  pdfKey: string
-): PdfCbzCacheEntry | undefined {
+export function getPdfCbzEntry(cache: CacheData, pdfKey: string): PdfCbzCacheEntry | undefined {
   return cache.transforms?.pdf?.cbz?.entries[pdfKey]
 }
 
-export function setPdfCbzEntry(
-  cache: CacheData,
-  pdfKey: string,
-  entry: PdfCbzCacheEntry
-): void {
+export function setPdfCbzEntry(cache: CacheData, pdfKey: string, entry: PdfCbzCacheEntry): void {
   if (!cache.transforms) {
     cache.transforms = {}
   }

@@ -15,9 +15,7 @@ type Pdf2CbzOptions = {
 async function commandExists(command: string): Promise<boolean> {
   const isWindows = process.platform === 'win32'
   const shell = isWindows ? 'cmd' : 'sh'
-  const commandArguments = isWindows
-    ? ['/c', `where ${command}`]
-    : ['-c', `command -v ${command}`]
+  const commandArguments = isWindows ? ['/c', `where ${command}`] : ['-c', `command -v ${command}`]
 
   return await new Promise<boolean>((resolve) => {
     const child = spawn(shell, commandArguments, { stdio: 'ignore' })
