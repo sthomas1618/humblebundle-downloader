@@ -4,7 +4,6 @@ stages:
   - package
   - release
 
-
 pypi-package:
   stage: package
   only:
@@ -17,9 +16,9 @@ pypi-package:
     - poetry publish
 
 .write_permission: &write_permission |
-    git config --global user.email "gitlab-ci"; git config --global user.name "gitlab-ci"
-    url_host=`git remote get-url origin | sed -e "s/https:\/\/gitlab-ci-token:.*@//g"`
-    git remote set-url origin "https://gitlab-ci-token:${CI_TAG_UPLOAD_TOKEN}@${url_host}"
+  git config --global user.email "gitlab-ci"; git config --global user.name "gitlab-ci"
+  url_host=`git remote get-url origin | sed -e "s/https:\/\/gitlab-ci-token:.*@//g"`
+  git remote set-url origin "https://gitlab-ci-token:${CI_TAG_UPLOAD_TOKEN}@${url_host}"
 
 tag:
   stage: release
@@ -39,10 +38,10 @@ build_image:
   only:
     - main
   script:
-        - export VERSION=$(grep -m 1 version pyproject.toml | tr -s ' ' | tr -d '"' | tr -d "'" | cut -d' ' -f3)
-        - export LATEST_IMAGE_TAG=ghcr.io/${GH_REGISTRY_USER}/humblebundle-downloader:latest
-        - export VERSION_IMAGE_TAG=ghcr.io/${GH_REGISTRY_USER}/humblebundle-downloader:$VERSION
-        - echo $GH_REGISTRY_PASSWORD | docker login -u $GH_REGISTRY_USER ghcr.io --password-stdin
-        - docker build -t $LATEST_IMAGE_TAG -t $VERSION_IMAGE_TAG .
-        - docker push $LATEST_IMAGE_TAG
-        - docker push $VERSION_IMAGE_TAG
+    - export VERSION=$(grep -m 1 version pyproject.toml | tr -s ' ' | tr -d '"' | tr -d "'" | cut -d' ' -f3)
+    - export LATEST_IMAGE_TAG=ghcr.io/${GH_REGISTRY_USER}/humblebundle-downloader:latest
+    - export VERSION_IMAGE_TAG=ghcr.io/${GH_REGISTRY_USER}/humblebundle-downloader:$VERSION
+    - echo $GH_REGISTRY_PASSWORD | docker login -u $GH_REGISTRY_USER ghcr.io --password-stdin
+    - docker build -t $LATEST_IMAGE_TAG -t $VERSION_IMAGE_TAG .
+    - docker push $LATEST_IMAGE_TAG
+    - docker push $VERSION_IMAGE_TAG
