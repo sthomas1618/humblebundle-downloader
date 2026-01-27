@@ -24,14 +24,14 @@ First thing to do is get your account cookies.
 This can be done by getting a browser extension that lets you see or export your cookies.
 
 - **Method 1 (recommended)**
-    - Get the value of the cookie called `_simpleauth_sess` and pass that value using `-s 'COOKIE_VALUE'`
-    - Note: The quotes in the cookie value are part of the value, you might need to wrap the entire value
-      (including double quotes) in single quotes. Some suggestions for common issues can be found in [issue #50](https://github.com/xtream1101/humblebundle-downloader/issues/50)
+  - Get the value of the cookie called `_simpleauth_sess` and pass that value using `-s 'COOKIE_VALUE'`
+  - Note: The quotes in the cookie value are part of the value, you might need to wrap the entire value
+    (including double quotes) in single quotes. Some suggestions for common issues can be found in [issue #50](https://github.com/xtream1101/humblebundle-downloader/issues/50)
 
 - **Method 2**
-    - Export the cookies in the Netscape format using an extension.
-      If your exported cookie file is not working, it may be a formatting issue.
-      This can be fixed by running the command `curl -b cookies.orig.txt --cookie-jar cookies.txt http://bogus`
+  - Export the cookies in the Netscape format using an extension.
+    If your exported cookie file is not working, it may be a formatting issue.
+    This can be fixed by running the command `curl -b cookies.orig.txt --cookie-jar cookies.txt http://bogus`
 
 ### 2. Downloading your library
 
@@ -72,6 +72,7 @@ updated content.
     }
   }
   ```
+
 - Use `--help` with all `hbd` commands to see available options
 - Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
   and look under the **Platform** dropdown
