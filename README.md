@@ -1,13 +1,9 @@
 # Humble Bundle Downloader
 
-[![PyPI](https://img.shields.io/pypi/v/humblebundle-downloader.svg)](https://pypi.python.org/pypi/humblebundle-downloader)
-[![PyPI](https://img.shields.io/pypi/l/humblebundle-downloader.svg)](https://pypi.python.org/pypi/humblebundle-downloader)
-
-**Download all of your content from your Humble Bundle Library!**  
+**Download all of your content from your Humble Bundle Library!**
 
 The first time this runs it may take a while because it will download everything.
-After that it will only download the content that has been updated or is missing.  
-
+After that it will only download the content that has been updated or is missing.
 
 ## Features
 
@@ -20,23 +16,7 @@ After that it will only download the content that has been updated or is missing
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
 - audit an existing library to rebuild the cache _(`hbd audit`)_
 
-
-## Install
-
-
-### Using PIP
-
-`pip install humblebundle-downloader`
-
-
-### Using docker
-
-Remember to mount your download directory in the container using dockers `-v` argument.
-`docker run ghcr.io/xtream1101/humblebundle-downloader -h`
-
-
 ## Instructions
-
 
 ### 1. Getting cookies
 
@@ -49,32 +29,28 @@ This can be done by getting a browser extension that lets you see or export your
       (including double quotes) in single quotes. Some suggestions for common issues can be found in [issue #50](https://github.com/xtream1101/humblebundle-downloader/issues/50)
 
 - **Method 2**
-    - Export the cookies in the Netscape format using an extension.  
+    - Export the cookies in the Netscape format using an extension.
       If your exported cookie file is not working, it may be a formatting issue.
       This can be fixed by running the command `curl -b cookies.orig.txt --cookie-jar cookies.txt http://bogus`
 
-
 ### 2. Downloading your library
 
-Use the following command to download your Humble Bundle Library:  
-`hbd --cookie-file cookies.txt --library-path "Downloaded Library" --progress`  
-_If using the docker image, exclude the `hbd` part of the command_
+Use the following command to download your Humble Bundle Library:
+`hbd --cookie-file cookies.txt --library-path "Downloaded Library" --progress`
 
-This directory structure will be used:  
+This directory structure will be used:
 `Downloaded Library/Purchase Name/Item Name/downloaded_file.ext`
-
 
 ### 3. Auditing an existing library
 
 If you already have a library downloaded but the cache file is missing or stale,
-you can rebuild it without downloading anything:  
-`hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"`  
-_To skip remote metadata lookups, add `--offline`_  
+you can rebuild it without downloading anything:
+`hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"`
+_To skip remote metadata lookups, add `--offline`_
 
 This scans your existing files, compares them against your Humble Bundle
 purchases, and updates `.cache.json` so future downloads only fetch missing or
 updated content.
-
 
 ## Notes
 

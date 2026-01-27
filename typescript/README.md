@@ -116,7 +116,3 @@ hbd --cookie-file cookies.txt --library-path "Downloaded Library" --progress
 - Implement purchase/product orchestration for library and trove downloads.
 - Wire platform/extension/key filters into the download selection logic.
 - Expand tests for API client behavior and CLI integration.
-
-## Porting references
-
-- [Python downloader flow inventory](docs/python-download-flow.md)
