@@ -3,21 +3,32 @@ name: CI
 on:
   pull_request:
     paths:
-      - 'typescript/**'
+      - 'bin/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'tsconfig.build.json'
+      - '.eslintrc.cjs'
+      - '.prettierrc.json'
       - '.github/workflows/ci-typescript.yml'
   push:
     branches:
       - main
     paths:
-      - 'typescript/**'
+      - 'bin/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'tsconfig.build.json'
+      - '.eslintrc.cjs'
+      - '.prettierrc.json'
       - '.github/workflows/ci-typescript.yml'
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: typescript
     steps:
       - name: Checkout
         uses: actions/checkout@v4
