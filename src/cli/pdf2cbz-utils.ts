@@ -7,9 +7,7 @@ const PDF_EXTENSION = '.pdf'
 /**
  * Resolve pdf2cbz inputs into PDF file paths and a cache root.
  */
-export async function resolveInputFiles(
-  input: string
-): Promise<{ files: string[]; root: string }> {
+export async function resolveInputFiles(input: string): Promise<{ files: string[]; root: string }> {
   return await resolveFiles(input, {
     matches: (filePath) => path.extname(filePath).toLowerCase() === PDF_EXTENSION,
   })
