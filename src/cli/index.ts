@@ -3,7 +3,7 @@ import { Command } from 'commander'
 
 import { registerAuditCommand } from './commands/audit'
 import { registerDownloadCommand } from './commands/download'
-import { registerPdf2CbzCommand } from './pdf2cbz'
+import { registerPdf2CbzCommand } from './commands/pdf2cbz'
 
 const program = new Command()
 
