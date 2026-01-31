@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import path from 'node:path'
@@ -15,6 +14,7 @@ import {
 import { convertPdfToCbz } from '../tools/pdf2cbz'
 import { runWithConcurrency } from '../utils/async'
 import { commonParentDirectory } from '../utils/path'
+import { assertPdf2CbzDependencies } from './pdf2cbz-dependencies'
 import { getOutputPath, isGlobInput, resolveInputFiles } from './pdf2cbz-utils'
 
 type Pdf2CbzOptions = {
@@ -25,42 +25,6 @@ type Pdf2CbzOptions = {
   concurrency?: number
   dryRun?: boolean
   render?: boolean
-}
-
-async function commandExists(command: string): Promise<boolean> {
-  const isWindows = process.platform === 'win32'
-  const shell = isWindows ? 'cmd' : 'sh'
-  const commandArguments = isWindows ? ['/c', `where ${command}`] : ['-c', `command -v ${command}`]
-
-  return await new Promise<boolean>((resolve) => {
-    const child = spawn(shell, commandArguments, { stdio: 'ignore' })
-    child.on('error', () => resolve(false))
-    child.on('close', (code) => resolve(code === 0))
-  })
-}
-
-function buildDependencyMessage(command: string): string {
-  return [
-    `Missing dependency: ${command}`,
-    'Install hints:',
-    '  macOS: brew install poppler',
-    '  Linux: apt install poppler-utils',
-    '  Windows: install Poppler and add bin to PATH',
-  ].join('\n')
-}
-
-async function assertDependencies(options: Pdf2CbzOptions, program: Command): Promise<void> {
-  const hasPdfImages = await commandExists('pdfimages')
-  if (!hasPdfImages) {
-    program.error(buildDependencyMessage('pdfimages'), { exitCode: 1 })
-  }
-
-  if (options.render) {
-    const hasPdftoppm = await commandExists('pdftoppm')
-    if (!hasPdftoppm) {
-      program.error(buildDependencyMessage('pdftoppm'), { exitCode: 1 })
-    }
-  }
 }
 
 export function registerPdf2CbzCommand(program: Command): void {
@@ -78,7 +42,7 @@ export function registerPdf2CbzCommand(program: Command): void {
     .option('--dry-run', 'Print actions without writing CBZs or cache', false)
     .option('--render', 'Render pages to PNGs when no embedded images exist', false)
     .action(async (input: string, options: Pdf2CbzOptions) => {
-      await assertDependencies(options, program)
+      await assertPdf2CbzDependencies(options, program)
       const { files, root } = await resolveInputFiles(input)
       if (files.length === 0) {
         program.error('No PDF files found to process.', { exitCode: 1 })
