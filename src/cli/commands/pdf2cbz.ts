@@ -14,7 +14,7 @@ import {
 import { convertPdfToCbz } from '../tools/pdf2cbz'
 import { runWithConcurrency } from '../utils/async'
 import { commonParentDirectory } from '../utils/path'
-import { assertPdf2CbzDependencies } from './pdf2cbz-dependencies'
+import { assertPdf2CbzDependencies } from '../pdf2cbz-dependencies'
 import { getOutputPath, isGlobInput, resolveInputFiles } from './pdf2cbz-utils'
 
 type Pdf2CbzOptions = {
