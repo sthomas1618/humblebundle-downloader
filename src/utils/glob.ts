@@ -34,8 +34,14 @@ function globToRegExp(pattern: string): RegExp {
     if (char === '*') {
       const next = normalized[index + 1]
       if (next === '*') {
-        regex += '.*'
-        index += 1
+        const nextNext = normalized[index + 2]
+        if (nextNext === '/') {
+          regex += '(?:.*/)?'
+          index += 2
+        } else {
+          regex += '.*'
+          index += 1
+        }
       } else {
         regex += '[^/]*'
       }
