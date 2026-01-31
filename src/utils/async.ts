@@ -7,7 +7,7 @@ export async function runWithConcurrency<T>(
   handler: (item: T) => Promise<void>
 ): Promise<void> {
   let index = 0
-  const worker = async (): Promise<void> => {
+  async function worker(): Promise<void> {
     while (index < items.length) {
       const current = items[index]
       index += 1

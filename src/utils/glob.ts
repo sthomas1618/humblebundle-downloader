@@ -5,7 +5,7 @@ import path from 'node:path'
  * Options for resolving input paths into matched files.
  */
 export type FileMatchOptions = {
-  filter: (filePath: string) => boolean
+  matches: (filePath: string) => boolean
 }
 
 /**
@@ -41,7 +41,7 @@ function globToRegExp(pattern: string): RegExp {
       }
     } else if (char === '?') {
       regex += '[^/]'
-    } else if ('\\.^$+{}()|[]'.includes(char)) {
+    } else if (String.raw`\\.^$+{}()|[]`.includes(char)) {
       regex += `\\${char}`
     } else {
       regex += char
@@ -76,7 +76,7 @@ async function collectFiles(directory: string, options: FileMatchOptions): Promi
     const entryPath = path.join(directory, entry.name)
     if (entry.isDirectory()) {
       results.push(...(await collectFiles(entryPath, options)))
-    } else if (entry.isFile() && options.filter(entryPath)) {
+    } else if (entry.isFile() && options.matches(entryPath)) {
       results.push(entryPath)
     }
   }
@@ -101,9 +101,9 @@ export async function resolveInputFiles(
     const globRoot = getGlobRoot(input)
     const matcher = globToRegExp(input)
     const allFiles = await collectFiles(globRoot, options)
-    const matched = allFiles.filter((file) =>
-      matcher.test(path.resolve(file).split(path.sep).join('/'))
-    )
+    const matched = allFiles.filter((file) => {
+      return matcher.test(path.resolve(file).split(path.sep).join('/'))
+    })
     return { files: matched, root: globRoot }
   }
 
@@ -112,7 +112,7 @@ export async function resolveInputFiles(
   if (stats.isDirectory()) {
     return { files: await collectFiles(resolved, options), root: resolved }
   }
-  if (stats.isFile() && options.filter(resolved)) {
+  if (stats.isFile() && options.matches(resolved)) {
     return { files: [resolved], root: path.dirname(resolved) }
   }
   return { files: [], root: resolved }
