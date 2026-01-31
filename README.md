@@ -154,6 +154,11 @@ the CBZ is regenerated.
 bun run hbd pdf2cbz "./library/**/*.pdf"
 ```
 
+Input resolution accepts a single PDF path, a directory (recursively scanned for PDFs), or
+glob patterns containing `*`/`?`. Output defaults to each PDF’s directory with a `.cbz`
+extension, or you can pass `--out <dir>` to write CBZs into a specific folder using the
+PDF’s basename.
+
 Use `--dry-run` to preview actions without writing CBZs or touching the cache.
 If a CBZ is regenerated, any existing `ComicInfo.xml` stored at the archive root is preserved
 and re-injected into the new CBZ.
