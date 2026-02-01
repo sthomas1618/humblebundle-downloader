@@ -179,6 +179,40 @@ export function shouldDownloadExtension(filename: string, config: AppConfig): bo
   return true
 }
 
+function getExtension(filename: string): string {
+  return filename.split('.').pop()?.toLowerCase() ?? ''
+}
+
+export function selectPreferredDownloadCandidates<T extends { filename: string }>(
+  candidates: T[],
+  config: AppConfig
+): T[] {
+  const priority = config.formatPriority ?? []
+  if (priority.length === 0 || candidates.length === 0) {
+    return candidates
+  }
+
+  const available = new Map<string, T[]>()
+  for (const candidate of candidates) {
+    const extension = getExtension(candidate.filename)
+    const bucket = available.get(extension)
+    if (bucket) {
+      bucket.push(candidate)
+    } else {
+      available.set(extension, [candidate])
+    }
+  }
+
+  for (const preferred of priority) {
+    const bucket = available.get(preferred)
+    if (bucket && bucket.length > 0) {
+      return bucket
+    }
+  }
+
+  return candidates
+}
+
 function getFilenameFromUrl(url: string): string {
   const withoutQuery = url.split('?')[0] ?? url
   const parts = withoutQuery.split('/')
@@ -360,6 +394,12 @@ export async function downloadLibrary({ client, config }: DownloadContext) {
           bundleTitle,
           product.human_name
         )
+        const webCandidates: Array<{
+          filename: string
+          url: string
+          fileSize?: number
+          md5?: string
+        }> = []
 
         for (const downloadType of product.downloads) {
           if (!shouldDownloadPlatform(downloadType.platform, config)) {
@@ -372,21 +412,11 @@ export async function downloadLibrary({ client, config }: DownloadContext) {
               if (!shouldDownloadExtension(filename, config)) {
                 continue
               }
-
-              const cacheKey = `${orderId}:${filename}`
-              const cacheEntry = cache[cacheKey]
-              if (cacheEntry && !config.updateOnly) {
-                continue
-              }
-
-              items.push({
+              webCandidates.push({
+                filename,
                 url: fileType.url.web,
-                destination: path.join(productFolder, filename),
-                label: filename,
-                expectedSize: fileType.file_size,
-                expectedMd5: fileType.md5,
-                cacheKey,
-                cacheEntry,
+                fileSize: fileType.file_size,
+                md5: fileType.md5,
               })
               continue
             }
@@ -469,6 +499,25 @@ export async function downloadLibrary({ client, config }: DownloadContext) {
               }
             }
           }
+        }
+
+        const selectedCandidates = selectPreferredDownloadCandidates(webCandidates, config)
+        for (const candidate of selectedCandidates) {
+          const cacheKey = `${orderId}:${candidate.filename}`
+          const cacheEntry = cache[cacheKey]
+          if (cacheEntry && !config.updateOnly) {
+            continue
+          }
+
+          items.push({
+            url: candidate.url,
+            destination: path.join(productFolder, candidate.filename),
+            label: candidate.filename,
+            expectedSize: candidate.fileSize,
+            expectedMd5: candidate.md5,
+            cacheKey,
+            cacheEntry,
+          })
         }
       }
     }

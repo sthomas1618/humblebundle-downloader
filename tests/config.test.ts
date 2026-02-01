@@ -16,6 +16,7 @@ describe('resolveConfig', () => {
       platformInclude: undefined,
       extInclude: undefined,
       extExclude: undefined,
+      formatPriority: ['cbz', 'epub', 'pdf', 'mobi'],
       purchaseKeys: undefined,
       offlineAudit: false,
     })
@@ -32,6 +33,7 @@ describe('resolveConfig', () => {
       platformInclude: ['ebook', 'video'],
       extInclude: ['pdf', 'mobi'],
       extExclude: ['zip'],
+      formatPriority: ['cbz', 'epub'],
       purchaseKeys: ['key1', 'key2'],
       offlineAudit: true,
     })
@@ -46,6 +48,7 @@ describe('resolveConfig', () => {
       platformInclude: ['ebook', 'video'],
       extInclude: ['pdf', 'mobi'],
       extExclude: ['zip'],
+      formatPriority: ['cbz', 'epub'],
       purchaseKeys: ['key1', 'key2'],
       offlineAudit: true,
     })
@@ -56,10 +59,12 @@ describe('resolveConfig', () => {
       platformInclude: ['Ebook', 'Video'],
       extInclude: ['PDF', 'MOBI'],
       extExclude: ['ZIP'],
+      formatPriority: ['CBZ', 'EPUB'],
     })
 
     expect(config.platformInclude).toEqual(['ebook', 'video'])
     expect(config.extInclude).toEqual(['pdf', 'mobi'])
     expect(config.extExclude).toEqual(['zip'])
+    expect(config.formatPriority).toEqual(['cbz', 'epub'])
   })
 })

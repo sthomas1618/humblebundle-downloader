@@ -17,6 +17,7 @@ type DownloadOptions = {
   progress?: boolean
   include?: string[]
   exclude?: string[]
+  formatPriority?: string[]
   keys?: string[]
 }
 
@@ -24,6 +25,10 @@ export function registerDownloadCommand(program: Command): void {
   program.name('hbd-ts').description('Bun-based TypeScript port of humblebundle-downloader')
 
   applyCommonOptions(program, { includeUpdate: true, includeProgress: true })
+  program.option(
+    '--format-priority <ext...>',
+    'Preferred file extensions in priority order; if none are available, download all files for the product'
+  )
   program.action(async (options: DownloadOptions) => {
     validateAuth(program, options)
 
@@ -37,6 +42,7 @@ export function registerDownloadCommand(program: Command): void {
       platformInclude: options.platform,
       extInclude: options.include,
       extExclude: options.exclude,
+      formatPriority: options.formatPriority,
       purchaseKeys: options.keys,
     })
 

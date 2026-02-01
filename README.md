@@ -134,6 +134,7 @@ Common options mirrored from the Python CLI:
 - `--progress`: Show per-item progress.
 - `-e, --exclude <ext...>`: Ignore file extensions.
 - `-i, --include <ext...>`: Only include file extensions.
+- `--format-priority <ext...>`: Prefer file extensions in priority order (default: `cbz, epub, pdf, mobi`); if none are available, download all files for the product. Include/exclude filters apply before format selection.
 - `-k, --keys <key...>`: Limit to purchase keys.
 - `--format-priority <format...>`: Preferred format ordering for downloadable web files only (does not filter external links or ASM content).
 
