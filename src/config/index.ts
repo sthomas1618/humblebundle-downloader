@@ -20,6 +20,8 @@ export type AppConfig = {
   extInclude?: string[]
   /** Exclude files with these extensions. */
   extExclude?: string[]
+  /** Preferred download extensions in priority order. */
+  formatPriority?: string[]
   /** Only download items from specific purchase keys. */
   purchaseKeys?: string[]
   /** Skip remote metadata lookups during audit. */
@@ -36,6 +38,7 @@ type ConfigOverrides = {
   platformInclude?: string[]
   extInclude?: string[]
   extExclude?: string[]
+  formatPriority?: string[]
   purchaseKeys?: string[]
   offlineAudit?: boolean
 }
@@ -48,6 +51,9 @@ function normalizeValues(values?: string[]): string[] | undefined {
 }
 
 export function resolveConfig(overrides: ConfigOverrides): AppConfig {
+  const defaultFormatPriority = ['cbz', 'epub', 'pdf', 'mobi']
+  const formatPriority = normalizeValues(overrides.formatPriority) ?? defaultFormatPriority
+
   return {
     cookieFile: overrides.cookieFile,
     sessionAuth: overrides.sessionAuth,
@@ -58,6 +64,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     platformInclude: normalizeValues(overrides.platformInclude),
     extInclude: normalizeValues(overrides.extInclude),
     extExclude: normalizeValues(overrides.extExclude),
+    formatPriority,
     purchaseKeys: overrides.purchaseKeys,
     offlineAudit: overrides.offlineAudit ?? false,
   }
