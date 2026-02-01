@@ -64,4 +64,37 @@ describe('glob utilities', () => {
       await rm(temporaryRoot, { recursive: true, force: true })
     }
   })
+
+  it('resolves single file inputs and captures parent root', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-glob-test-'))
+    const filePath = path.join(temporaryRoot, 'sample.txt')
+    await createFile(filePath)
+
+    try {
+      const result = await resolveInputFiles(filePath, {
+        matches: (inputPath) => path.extname(inputPath) === '.txt',
+      })
+      expect(result.files).toEqual([filePath])
+      expect(result.root).toBe(temporaryRoot)
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('handles glob patterns rooted above current directory', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-glob-test-'))
+    const nestedDirectory = path.join(temporaryRoot, 'nested')
+    await createFile(path.join(nestedDirectory, 'example.txt'))
+
+    try {
+      const relativePattern = path.join(temporaryRoot, 'nested', '*.txt')
+      const result = await resolveInputFiles(relativePattern, {
+        matches: (inputPath) => path.extname(inputPath) === '.txt',
+      })
+      expect(result.root).toBe(nestedDirectory)
+      expect(result.files).toEqual([path.join(nestedDirectory, 'example.txt')])
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
 })
