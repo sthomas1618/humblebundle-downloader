@@ -15,4 +15,18 @@ describe('commonParentDirectory', () => {
   it('returns cwd for empty input', () => {
     expect(commonParentDirectory([])).toBe(process.cwd())
   })
+
+  it('returns the filesystem root when paths diverge immediately', () => {
+    const left = path.resolve('/tmp', 'alpha', 'file.txt')
+    const right = path.resolve('/var', 'beta', 'file.txt')
+
+    expect(commonParentDirectory([left, right])).toBe('')
+  })
+
+  it('returns the full path when all inputs match', () => {
+    const root = path.resolve('/tmp', 'shared')
+    const file = path.join(root, 'file.txt')
+
+    expect(commonParentDirectory([file, file])).toBe(file)
+  })
 })
