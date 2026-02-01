@@ -135,6 +135,7 @@ Common options mirrored from the Python CLI:
 - `-e, --exclude <ext...>`: Ignore file extensions.
 - `-i, --include <ext...>`: Only include file extensions.
 - `-k, --keys <key...>`: Limit to purchase keys.
+- `--format-priority <format...>`: Preferred format ordering for downloadable web files only (does not filter external links or ASM content).
 
 To rebuild the cache from existing files without downloading:
 
