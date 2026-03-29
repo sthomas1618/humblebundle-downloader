@@ -1,10 +1,10 @@
-import path from 'node:path'
-
 import { describe, expect, it } from 'bun:test'
 
 import { commandExists, runCommand } from '../src/utils/command'
 
 describe('command utilities', () => {
+  const knownCommand = process.platform === 'win32' ? 'where.exe' : 'sh'
+
   it('runs commands and resolves on success', async () => {
     await expect(
       runCommand(process.execPath, ['-e', 'process.exit(0)'], 'ignore')
@@ -18,9 +18,7 @@ describe('command utilities', () => {
   })
 
   it('detects existing commands', async () => {
-    const executable = path.basename(process.execPath)
-
-    await expect(commandExists(executable)).resolves.toBe(true)
+    await expect(commandExists(knownCommand)).resolves.toBe(true)
   })
 
   it('returns false for missing commands', async () => {
