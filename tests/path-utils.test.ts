@@ -20,7 +20,7 @@ describe('commonParentDirectory', () => {
     const left = path.resolve('/tmp', 'alpha', 'file.txt')
     const right = path.resolve('/var', 'beta', 'file.txt')
 
-    expect(commonParentDirectory([left, right])).toBe('')
+    expect(commonParentDirectory([left, right])).toBe(path.parse(left).root)
   })
 
   it('returns the full path when all inputs match', () => {

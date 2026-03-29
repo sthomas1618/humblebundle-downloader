@@ -35,6 +35,6 @@ describe('pdf2cbz utils', () => {
 
     const outDirectory = path.join('/tmp', 'out')
     const customPath = getOutputPath(pdfPath, outDirectory)
-    expect(customPath).toBe(path.join(outDirectory, 'comic.cbz'))
+    expect(customPath).toBe(path.join(path.resolve(outDirectory), 'comic.cbz'))
   })
 })
