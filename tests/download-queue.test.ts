@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -199,6 +199,65 @@ describe('downloadQueue', () => {
       expect(report.failures[0]?.error).toContain('MD5 mismatch')
       expect(report.failures[0]?.error).not.toContain('https://example.com')
       expect(report.failures[0]?.url).toBeUndefined()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('creates the library path before writing the initial failure report', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const libraryPath = path.join(temporaryDirectory, 'new-library')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Book',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/book.cbz',
+                    },
+                    md5: 'not-the-real-md5',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    globalThis.fetch = async () => new Response('bad-content')
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          libraryPath,
+          purchaseKeys: ['order-1'],
+          extInclude: ['cbz'],
+          formatPriority: ['cbz'],
+        }),
+      })
+
+      expect(summary.failed).toBe(1)
+      await access(path.join(libraryPath, '.download-failures.json'))
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }

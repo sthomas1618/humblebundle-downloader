@@ -421,6 +421,7 @@ function emitProgressChunk(onProgress: DownloadContext['onProgress'], message: s
 
 async function writeJsonWithFallback(filePath: string, data: unknown): Promise<void> {
   const temporaryPath = `${filePath}.tmp`
+  await mkdir(path.dirname(filePath), { recursive: true })
   await writeFile(temporaryPath, JSON.stringify(data, undefined, 2))
   try {
     await rename(temporaryPath, filePath)
@@ -1049,8 +1050,16 @@ function canLocalFormatSatisfyRemote(
 ): boolean {
   const remoteExtension = getExtension(remoteFilename)
   const localExtension = getExtension(path.basename(localPath))
+  if (localExtension === remoteExtension) {
+    return true
+  }
   if (remoteExtension === 'pdf' && (localExtension === 'epub' || localExtension === 'mobi')) {
     return true
+  }
+
+  const priority = config.formatPriority ?? []
+  if (!priority.includes(localExtension) || !priority.includes(remoteExtension)) {
+    return false
   }
 
   return (
