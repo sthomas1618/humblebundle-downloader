@@ -24,8 +24,14 @@ export function registerAuditCommand(program: Command): void {
     .command('audit')
     .description('Rebuild the cache from existing files without downloading')
 
-  applyCommonOptions(auditCommand, { includeOffline: true })
-  auditCommand.action(async (options: AuditOptions) => {
+  applyCommonOptions(auditCommand, { includeOffline: true, requireLibraryPath: false })
+  auditCommand.action(async () => {
+    const options = auditCommand.optsWithGlobals<AuditOptions>()
+
+    if (!options.libraryPath) {
+      auditCommand.error("required option '-l, --library-path <path>' not specified")
+    }
+
     validateAuth(program, options)
 
     const config = resolveConfig({
@@ -43,9 +49,27 @@ export function registerAuditCommand(program: Command): void {
     const session = await createSession(config)
     const client = createClient(session)
 
-    await auditLibrary({
+    const summary = await auditLibrary({
       client,
       config,
+      onProgress: (message, options) => {
+        if (options?.newline === false) {
+          process.stdout.write(message)
+          return
+        }
+        console.info(message)
+      },
     })
+    console.info(
+      [
+        'Audit complete.',
+        `Orders: ${summary.ordersProcessed}/${summary.purchaseKeys}.`,
+        `Products: ${summary.productsProcessed}.`,
+        `Candidates: ${summary.candidatesConsidered}.`,
+        `Selected: ${summary.selectedCandidates}.`,
+        `Matched: ${summary.matchedFiles}.`,
+        `Cache entries: ${summary.cacheEntries}.`,
+      ].join(' ')
+    )
   })
 }

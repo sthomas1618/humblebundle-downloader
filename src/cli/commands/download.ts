@@ -24,12 +24,22 @@ type DownloadOptions = {
 export function registerDownloadCommand(program: Command): void {
   program.name('hbd-ts').description('Bun-based TypeScript port of humblebundle-downloader')
 
-  applyCommonOptions(program, { includeUpdate: true, includeProgress: true })
+  applyCommonOptions(program, {
+    includeUpdate: true,
+    includeProgress: true,
+    requireLibraryPath: false,
+  })
   program.option(
     '--format-priority <ext...>',
     'Preferred file extensions in priority order; if none are available, download all files for the product'
   )
-  program.action(async (options: DownloadOptions) => {
+  program.action(async () => {
+    const options = program.optsWithGlobals<DownloadOptions>()
+
+    if (!options.libraryPath) {
+      program.error("required option '-l, --library-path <path>' not specified")
+    }
+
     validateAuth(program, options)
 
     const config = resolveConfig({
@@ -49,9 +59,29 @@ export function registerDownloadCommand(program: Command): void {
     const session = await createSession(config)
     const client = createClient(session)
 
-    await downloadLibrary({
+    const summary = await downloadLibrary({
       client,
       config,
+      onProgress: (message, options) => {
+        if (options?.newline === false) {
+          process.stdout.write(message)
+          return
+        }
+        console.info(message)
+      },
     })
+    const summaryParts = [
+      'Download complete.',
+      `Orders: ${summary.purchaseKeys}.`,
+      `Queued: ${summary.queued}.`,
+      `Downloaded: ${summary.downloaded}.`,
+      `Skipped: ${summary.skipped}.`,
+      `Failed: ${summary.failed}.`,
+      `Cache entries: ${summary.cacheEntries}.`,
+    ]
+    if (summary.failed > 0 && summary.failureReportPath) {
+      summaryParts.push(`Failure report: ${summary.failureReportPath}.`)
+    }
+    console.info(summaryParts.join(' '))
   })
 }

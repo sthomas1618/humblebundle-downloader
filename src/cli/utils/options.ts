@@ -4,16 +4,26 @@ type CommonOptions = {
   includeUpdate?: boolean
   includeProgress?: boolean
   includeOffline?: boolean
+  requireLibraryPath?: boolean
 }
 
 export function applyCommonOptions(command: Command, options: CommonOptions): void {
-  const { includeUpdate = false, includeProgress = false, includeOffline = false } = options
+  const {
+    includeUpdate = false,
+    includeProgress = false,
+    includeOffline = false,
+    requireLibraryPath = true,
+  } = options
   command.option('-c, --cookie-file <path>', 'Path to cookies.txt')
   command.option(
     '-s, --session-auth <value>',
     'Value of the cookie _simpleauth_sess (wrap in quotes)'
   )
-  command.requiredOption('-l, --library-path <path>', 'Download directory')
+  if (requireLibraryPath) {
+    command.requiredOption('-l, --library-path <path>', 'Download directory')
+  } else {
+    command.option('-l, --library-path <path>', 'Download directory')
+  }
   command.option('-t, --trove', 'Only check and download Humble Trove content', false)
   if (includeUpdate) {
     command.option('-u, --update', 'Check for updates (still download new products)', false)
