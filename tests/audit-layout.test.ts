@@ -399,6 +399,35 @@ describe('auditLibrary layout detection', () => {
     }
   })
 
+  it('does not let unranked local extensions satisfy unranked remote extensions', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const bundleFolder = path.join(temporaryRoot, 'Manual Bundle')
+      await mkdir(bundleFolder)
+      await writeFile(path.join(bundleFolder, 'manual.txt'), 'text file')
+
+      await auditLibrary({
+        client: createSingleProductClient('Manual Bundle', ['manual.zip']),
+        config: resolveConfig({
+          libraryPath: temporaryRoot,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          formatPriority: ['cbz', 'pdf'],
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(path.join(temporaryRoot, '.cache.json'), 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:manual.zip']).toBeUndefined()
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('lets existing ebook formats satisfy PDF-only book downloads', async () => {
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
 
