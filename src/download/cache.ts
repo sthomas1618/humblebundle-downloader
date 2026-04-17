@@ -1,4 +1,4 @@
-import { readFile, rename, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 export type CacheEntry = {
@@ -119,5 +119,18 @@ export async function saveCache(libraryPath: string, cache: CacheData): Promise<
   const cachePath = path.join(libraryPath, CACHE_FILE)
   const temporaryPath = path.join(libraryPath, `${CACHE_FILE}.tmp`)
   await writeFile(temporaryPath, payload)
-  await rename(temporaryPath, cachePath)
+  try {
+    await rename(temporaryPath, cachePath)
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      'code' in error &&
+      (error.code === 'EPERM' || error.code === 'EACCES')
+    ) {
+      await copyFile(temporaryPath, cachePath)
+      await rm(temporaryPath, { force: true })
+      return
+    }
+    throw error
+  }
 }
