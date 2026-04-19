@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import type { ApiClient } from '../src/api/client'
 import { resolveConfig } from '../src/config'
 import { downloadLibrary, downloadQueue } from '../src/download/downloader'
+import { buildProductFolder } from '../src/utils/fs'
 
 describe('downloadQueue', () => {
   const originalFetch = globalThis.fetch
@@ -162,10 +163,12 @@ describe('downloadQueue', () => {
     globalThis.fetch = async () => new Response('bad-content')
 
     try {
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
       const summary = await downloadLibrary({
         client,
         config: resolveConfig({
           libraryPath: temporaryDirectory,
+          metadataPath,
           purchaseKeys: ['order-1'],
           extInclude: ['cbz'],
           formatPriority: ['cbz'],
@@ -176,6 +179,8 @@ describe('downloadQueue', () => {
       expect(summary.failureReportPath).toBe(
         path.join(temporaryDirectory, '.download-failures.json')
       )
+      expect(summary.metadataOrders).toBe(1)
+      expect(summary.metadataPath).toBe(metadataPath)
 
       const report = JSON.parse(await readFile(summary.failureReportPath, 'utf8')) as {
         failed: number
@@ -199,6 +204,32 @@ describe('downloadQueue', () => {
       expect(report.failures[0]?.error).toContain('MD5 mismatch')
       expect(report.failures[0]?.error).not.toContain('https://example.com')
       expect(report.failures[0]?.url).toBeUndefined()
+
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as {
+        orders: Record<
+          string,
+          {
+            products: Array<{
+              downloads: Array<{
+                cacheKey: string
+                filename: string
+                extension: string
+                md5?: string
+                url?: string
+              }>
+            }>
+          }
+        >
+      }
+      expect(metadata.orders['order-1']?.products[0]?.downloads[0]).toEqual({
+        cacheKey: 'order-1:bad.cbz',
+        filename: 'bad.cbz',
+        extension: 'cbz',
+        platform: 'ebook',
+        md5: 'not-the-real-md5',
+      })
+      expect(JSON.stringify(metadata)).not.toContain('https://')
+      expect(metadata.orders['order-1']?.products[0]?.downloads[0]?.url).toBeUndefined()
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
@@ -258,6 +289,714 @@ describe('downloadQueue', () => {
 
       expect(summary.failed).toBe(1)
       await access(path.join(libraryPath, '.download-failures.json'))
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('uses configured library roots and writes the configured failure report path', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const booksPath = path.join(temporaryDirectory, 'Books')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const existingBundle = path.join(comicsPath, 'Cross Folder Bundle')
+    await mkdir(existingBundle, { recursive: true })
+    await writeFile(path.join(existingBundle, 'story.cbz'), 'existing cbz')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Cross Folder Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Story',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/story.pdf',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    globalThis.fetch = async () => {
+      throw new Error('Download should have been skipped')
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(0)
+      expect(summary.locallySatisfied).toBe(1)
+      expect(summary.failureReportPath).toBe(failureReportPath)
+      await access(failureReportPath)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('routes configured extensions to their preferred library', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const booksPath = path.join(temporaryDirectory, 'Books')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Book Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Story',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/story.pdf',
+                    },
+                  },
+                  {
+                    url: {
+                      web: 'https://example.com/story.epub',
+                    },
+                  },
+                  {
+                    url: {
+                      web: 'https://example.com/story.mobi',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    const downloadedUrls: string[] = []
+    globalThis.fetch = async (input) => {
+      downloadedUrls.push(String(input))
+      return new Response('epub content')
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(1)
+      expect(summary.downloaded).toBe(1)
+      expect(downloadedUrls).toEqual(['https://example.com/story.epub'])
+      expect(
+        await readFile(path.join(booksPath, 'Book Bundle', 'Story', 'story.epub'), 'utf8')
+      ).toBe('epub content')
+      await expect(
+        readFile(path.join(comicsPath, 'Book Bundle', 'Story', 'story.pdf'), 'utf8')
+      ).rejects.toThrow()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('lets bundle title routes outrank generic extension routes', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const booksPath = path.join(temporaryDirectory, 'Books')
+    const mangaPath = path.join(temporaryDirectory, 'Manga')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Humble Manga Bundle - Fantasy by Kodansha Comics',
+        },
+        subproducts: [
+          {
+            human_name: 'Flying Witch Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  { url: { web: 'https://example.com/flyingwitch_vol1.epub' } },
+                  { url: { web: 'https://example.com/flyingwitch_vol1.pdf' } },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    const downloadedUrls: string[] = []
+    globalThis.fetch = async (input) => {
+      downloadedUrls.push(String(input))
+      return new Response(String(input))
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          routes: [
+            {
+              id: 'manga-bundles',
+              library: 'manga',
+              bundleTitlePatterns: [String.raw`\bmanga\b`],
+            },
+            {
+              id: 'ebook-formats',
+              library: 'books',
+              extensions: ['epub', 'mobi'],
+            },
+          ],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+            manga: {
+              path: mangaPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(1)
+      expect(summary.downloaded).toBe(1)
+      expect(downloadedUrls).toEqual(['https://example.com/flyingwitch_vol1.pdf'])
+      await access(
+        path.join(
+          mangaPath,
+          'Humble Manga Bundle - Fantasy by Kodansha Comics',
+          'Flying Witch Vol. 1',
+          'flyingwitch_vol1.pdf'
+        )
+      )
+      await expect(
+        access(
+          path.join(
+            booksPath,
+            'Humble Manga Bundle - Fantasy by Kodansha Comics',
+            'Flying Witch Vol. 1',
+            'flyingwitch_vol1.epub'
+          )
+        )
+      ).rejects.toThrow()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('routes EPUB-only comic bundle products to comics as a fallback format', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const booksPath = path.join(temporaryDirectory, 'Books')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: "Humble Comics Bundle: Mike Mignola's B.P.R.D. by Dark Horse ENCORE",
+        },
+        subproducts: [
+          {
+            human_name: 'Hellboy: Odd Jobs',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [{ url: { web: 'https://example.com/hellboy_oddjobs.epub' } }],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    globalThis.fetch = async () => new Response('epub content')
+
+    try {
+      const bundleTitle = "Humble Comics Bundle: Mike Mignola's B.P.R.D. by Dark Horse ENCORE"
+      const productTitle = 'Hellboy: Odd Jobs'
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          routes: [
+            {
+              id: 'comic-bundles',
+              library: 'comics',
+              bundleTitlePatterns: [String.raw`\bcomics?\s+bundle\b`],
+            },
+            {
+              id: 'ebook-formats',
+              library: 'books',
+              extensions: ['epub', 'mobi'],
+            },
+          ],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf', 'epub', 'mobi'],
+              extInclude: ['cbz', 'pdf', 'epub', 'mobi'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(1)
+      expect(summary.downloaded).toBe(1)
+      expect(
+        await readFile(
+          path.join(
+            buildProductFolder(comicsPath, bundleTitle, productTitle),
+            'hellboy_oddjobs.epub'
+          ),
+          'utf8'
+        )
+      ).toBe('epub content')
+      await expect(
+        access(
+          path.join(
+            buildProductFolder(booksPath, bundleTitle, productTitle),
+            'hellboy_oddjobs.epub'
+          )
+        )
+      ).rejects.toThrow()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('routes CBZ files in book bundles to comics even when books is the default library', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const booksPath = path.join(temporaryDirectory, 'Books')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Humble Book Bundle: Geek Gals',
+        },
+        subproducts: [
+          {
+            human_name: 'Paper Girls Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [{ url: { web: 'https://example.com/papergirls_vol1.cbz' } }],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    globalThis.fetch = async () => new Response('cbz content')
+
+    try {
+      const bundleTitle = 'Humble Book Bundle: Geek Gals'
+      const productTitle = 'Paper Girls Vol. 1'
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          routes: [
+            {
+              id: 'comic-formats',
+              library: 'comics',
+              extensions: ['cbz'],
+            },
+            {
+              id: 'book-bundles',
+              library: 'books',
+              bundleTitlePatterns: [String.raw`\b(?:book bundle|ebooks?|e-books?|novels?)\b`],
+            },
+          ],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf', 'epub', 'mobi'],
+              extInclude: ['cbz', 'pdf', 'epub', 'mobi'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(1)
+      expect(summary.downloaded).toBe(1)
+      expect(
+        await readFile(
+          path.join(
+            buildProductFolder(comicsPath, bundleTitle, productTitle),
+            'papergirls_vol1.cbz'
+          ),
+          'utf8'
+        )
+      ).toBe('cbz content')
+      await expect(
+        access(
+          path.join(buildProductFolder(booksPath, bundleTitle, productTitle), 'papergirls_vol1.cbz')
+        )
+      ).rejects.toThrow()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('lets earlier bundle routes win over later product hints', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const booksPath = path.join(temporaryDirectory, 'Books')
+    const mangaPath = path.join(temporaryDirectory, 'Manga')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Humble Manga Bundle - Mixed Stories',
+        },
+        subproducts: [
+          {
+            human_name: 'Space Novel',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  { url: { web: 'https://example.com/space-novel.pdf' } },
+                  { url: { web: 'https://example.com/space-novel.epub' } },
+                ],
+              },
+            ],
+          },
+          {
+            human_name: 'Robot Manga Vol 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  { url: { web: 'https://example.com/robot-manga-vol1.pdf' } },
+                  { url: { web: 'https://example.com/robot-manga-vol1.cbz' } },
+                ],
+              },
+            ],
+          },
+          {
+            human_name: 'Cookbook Guide',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [{ url: { web: 'https://example.com/cookbook.pdf' } }],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    const downloadedUrls: string[] = []
+    globalThis.fetch = async (input) => {
+      downloadedUrls.push(String(input))
+      return new Response(String(input))
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          routes: [
+            {
+              id: 'manga-products',
+              library: 'manga',
+              productTitlePatterns: [String.raw`\bmanga\b`],
+              filenamePatterns: [String.raw`\bmanga\b`],
+            },
+            {
+              id: 'manga-bundles',
+              library: 'manga',
+              bundleTitlePatterns: [String.raw`\bmanga\b`],
+            },
+            {
+              id: 'book-products',
+              library: 'books',
+              productTitlePatterns: [String.raw`\b(?:novel|guide|book)\b`],
+              filenamePatterns: [String.raw`\b(?:novel|guide|book)\b`],
+            },
+            {
+              id: 'ebook-formats',
+              library: 'books',
+              extensions: ['epub', 'mobi'],
+            },
+          ],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+            manga: {
+              path: mangaPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(3)
+      expect(summary.downloaded).toBe(3)
+      expect(downloadedUrls).toEqual([
+        'https://example.com/space-novel.pdf',
+        'https://example.com/robot-manga-vol1.cbz',
+        'https://example.com/cookbook.pdf',
+      ])
+      await access(
+        path.join(
+          mangaPath,
+          'Humble Manga Bundle - Mixed Stories',
+          'Robot Manga Vol 1',
+          'robot-manga-vol1.cbz'
+        )
+      )
+      await access(
+        path.join(
+          mangaPath,
+          'Humble Manga Bundle - Mixed Stories',
+          'Space Novel',
+          'space-novel.pdf'
+        )
+      )
+      await access(
+        path.join(
+          mangaPath,
+          'Humble Manga Bundle - Mixed Stories',
+          'Cookbook Guide',
+          'cookbook.pdf'
+        )
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('uses additional scan paths and a shared cache to avoid cross-folder downloads', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const libraryPath = path.join(temporaryDirectory, 'Comics')
+    const scanPath = path.join(temporaryDirectory, 'Manga')
+    const cachePath = path.join(temporaryDirectory, '.hbd-cache.json')
+    const existingBundle = path.join(scanPath, 'Cross Folder Bundle')
+    await mkdir(existingBundle, { recursive: true })
+    await writeFile(path.join(existingBundle, 'story.cbz'), 'existing cbz')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Cross Folder Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Story',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/story.pdf',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    globalThis.fetch = async () => {
+      throw new Error('Download should have been skipped')
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          libraryPath,
+          scanPaths: [scanPath],
+          cachePath,
+          purchaseKeys: ['order-1'],
+          extInclude: ['cbz', 'pdf'],
+          formatPriority: ['cbz', 'pdf'],
+        }),
+      })
+
+      expect(summary.queued).toBe(0)
+      expect(summary.downloaded).toBe(0)
+      expect(summary.locallySatisfied).toBe(1)
+
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+      expect(cache?.['order-1:story.pdf']).toEqual({
+        urlLastModified: expect.any(String),
+      })
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }

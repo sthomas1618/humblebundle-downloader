@@ -7,6 +7,7 @@ import { describe, expect, it } from 'bun:test'
 import type { ApiClient } from '../src/api/client'
 import { resolveConfig } from '../src/config'
 import { auditLibrary } from '../src/download/downloader'
+import { buildProductFolder } from '../src/utils/fs'
 
 function createClient(
   bundleTitle = 'Bundle:Name',
@@ -146,6 +147,67 @@ describe('auditLibrary layout detection', () => {
     }
   })
 
+  it('matches existing bundle folders by similar legacy title', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const bundleFolder = path.join(temporaryRoot, 'MICROIDS GAMES & COMICS CROSSOVER COLLECTION')
+      await mkdir(bundleFolder)
+      await writeFile(path.join(bundleFolder, 'spellbound1.epub'), 'bundle file')
+
+      await auditLibrary({
+        client: createClient('Microids: Games & Comics Crossover Collection', ['spellbound1.epub']),
+        config: resolveConfig({
+          libraryPath: temporaryRoot,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(path.join(temporaryRoot, '.cache.json'), 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:spellbound1.epub']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('does not use similar bundle title matching when multiple folders match', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const firstFolder = path.join(temporaryRoot, 'MICROIDS')
+      const secondFolder = path.join(temporaryRoot, 'MICROIDS GAMES & COMICS CROSSOVER COLLECTION')
+      await mkdir(firstFolder)
+      await mkdir(secondFolder)
+      await writeFile(path.join(firstFolder, 'spellbound1.epub'), 'bundle file')
+      await writeFile(path.join(secondFolder, 'spellbound1.epub'), 'bundle file')
+
+      await auditLibrary({
+        client: createClient('Microids: Games & Comics Crossover Collection', ['spellbound1.epub']),
+        config: resolveConfig({
+          libraryPath: temporaryRoot,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(path.join(temporaryRoot, '.cache.json'), 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:spellbound1.epub']).toBeUndefined()
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('infers a bundle folder from multiple matching filenames', async () => {
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
 
@@ -231,6 +293,192 @@ describe('auditLibrary layout detection', () => {
       expect(cache?.['order-1:root-only.cbz']).toEqual({
         urlLastModified: expect.any(String),
       })
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('seeds cache from files in additional scan roots', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const libraryPath = path.join(temporaryRoot, 'Comics')
+      const scanPath = path.join(temporaryRoot, 'Books')
+      const bundleFolder = path.join(scanPath, 'Cross Folder Bundle')
+      await mkdir(bundleFolder, { recursive: true })
+      await writeFile(path.join(bundleFolder, 'story.cbz'), 'scan file')
+
+      const summary = await auditLibrary({
+        client: createSingleProductClient('Cross Folder Bundle', ['story.cbz']),
+        config: resolveConfig({
+          libraryPath,
+          scanPaths: [scanPath],
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(path.join(libraryPath, '.cache.json'), 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:story.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(summary.matchedFiles).toBe(1)
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('audits routed configured libraries with their own preferred formats', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const comicsPath = path.join(temporaryRoot, 'Comics')
+      const booksPath = path.join(temporaryRoot, 'Books')
+      const bundleFolder = path.join(booksPath, 'Book Bundle')
+      const cachePath = path.join(temporaryRoot, '.hbd', 'cache.json')
+      await mkdir(bundleFolder, { recursive: true })
+      await writeFile(path.join(bundleFolder, 'novel.epub'), 'epub file')
+
+      await auditLibrary({
+        client: createSingleProductClient('Book Bundle', ['novel.epub', 'novel.pdf']),
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:novel.epub']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache?.['order-1:novel.pdf']).toBeUndefined()
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the routed library format priority when matching cross-library files', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const comicsPath = path.join(temporaryRoot, 'Comics')
+      const booksPath = path.join(temporaryRoot, 'Books')
+      const cachePath = path.join(temporaryRoot, '.hbd', 'cache.json')
+      const bundleTitle = 'Humble Comics Bundle: Art Books'
+      const productTitle = 'Product'
+      const misplacedFolder = buildProductFolder(booksPath, bundleTitle, productTitle)
+      await mkdir(misplacedFolder, { recursive: true })
+      await writeFile(path.join(misplacedFolder, 'artofgoosebumps.epub'), 'epub file')
+
+      const summary = await auditLibrary({
+        client: createSingleProductClient(bundleTitle, [
+          'artofgoosebumps.pdf',
+          'artofgoosebumps.epub',
+        ]),
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          cachePath,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          routes: [
+            {
+              id: 'comic-bundles',
+              library: 'comics',
+              bundleTitlePatterns: [String.raw`\bcomics?\s+bundle\b`],
+            },
+            {
+              id: 'ebook-formats',
+              library: 'books',
+              extensions: ['epub', 'mobi'],
+            },
+          ],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf', 'epub', 'mobi'],
+              extInclude: ['cbz', 'pdf', 'epub', 'mobi'],
+            },
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:artofgoosebumps.pdf']).toBeUndefined()
+      expect(cache?.['order-1:artofgoosebumps.epub']).toBeUndefined()
+      expect(summary).toMatchObject({
+        selectedCandidates: 1,
+        matchedFiles: 0,
+      })
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('does not let a lower-priority configured book format satisfy a preferred remote format', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const booksPath = path.join(temporaryRoot, 'Books')
+      const bundleFolder = path.join(booksPath, 'Book Bundle')
+      const cachePath = path.join(temporaryRoot, '.hbd', 'cache.json')
+      await mkdir(bundleFolder, { recursive: true })
+      await writeFile(path.join(bundleFolder, 'novel.mobi'), 'mobi file')
+
+      await auditLibrary({
+        client: createSingleProductClient('Book Bundle', ['novel.epub']),
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          cachePath,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:novel.epub']).toBeUndefined()
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true })
     }
@@ -369,6 +617,82 @@ describe('auditLibrary layout detection', () => {
     }
   })
 
+  it('writes order metadata for all web download candidates without URLs', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const bundleFolder = path.join(temporaryRoot, 'Preferred Bundle')
+      const metadataPath = path.join(temporaryRoot, '.hbd', 'metadata.json')
+      await mkdir(bundleFolder, { recursive: true })
+      await writeFile(path.join(bundleFolder, 'story.cbz'), 'cbz file')
+
+      const summary = await auditLibrary({
+        client: createSingleProductClient('Preferred Bundle', [
+          'story.cbz',
+          'story.pdf',
+          'story.epub',
+        ]),
+        config: resolveConfig({
+          libraryPath: temporaryRoot,
+          metadataPath,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          formatPriority: ['cbz', 'pdf', 'epub'],
+        }),
+      })
+
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as {
+        version: number
+        orders: Record<
+          string,
+          {
+            bundleTitle: string
+            products: Array<{
+              productTitle: string
+              downloads: Array<{
+                cacheKey: string
+                filename: string
+                extension: string
+                platform: string
+                url?: string
+              }>
+            }>
+          }
+        >
+      }
+
+      expect(summary.metadataOrders).toBe(1)
+      expect(summary.metadataPath).toBe(metadataPath)
+      expect(metadata.version).toBe(1)
+      expect(metadata.orders['order-1']?.bundleTitle).toBe('Preferred Bundle')
+      expect(metadata.orders['order-1']?.products[0]?.downloads).toEqual([
+        {
+          cacheKey: 'order-1:story.cbz',
+          filename: 'story.cbz',
+          extension: 'cbz',
+          platform: 'ebook',
+        },
+        {
+          cacheKey: 'order-1:story.pdf',
+          filename: 'story.pdf',
+          extension: 'pdf',
+          platform: 'ebook',
+        },
+        {
+          cacheKey: 'order-1:story.epub',
+          filename: 'story.epub',
+          extension: 'epub',
+          platform: 'ebook',
+        },
+      ])
+      expect(JSON.stringify(metadata)).not.toContain('https://')
+      expect(metadata.orders['order-1']?.products[0]?.downloads[0]?.url).toBeUndefined()
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('does not let a lower-priority local format satisfy a preferred remote format', async () => {
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
 
@@ -480,7 +804,8 @@ describe('auditLibrary layout detection', () => {
 
       expect(messages).toContain('Indexing local files...')
       expect(messages).toContain('Auditing order 1/1...')
-      expect(messages.at(-1)).toBe('Wrote 1 cache entries.')
+      expect(messages).toContain('Wrote 1 cache entries.')
+      expect(messages.at(-1)).toBe('Wrote metadata for 1 order(s).')
       expect(summary.cacheEntries).toBe(1)
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true })

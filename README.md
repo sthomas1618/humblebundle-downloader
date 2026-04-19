@@ -15,6 +15,11 @@ After that it will only download the content that has been updated or is missing
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
 - audit an existing library to rebuild the cache _(`hbd audit`)_
+- validate config, libraries, routing, cache, and auth _(`hbd doctor`)_
+- organize existing files into their routed library _(`hbd organize`)_
+- remove empty folders left after moves _(`hbd cleanup`)_
+- scan additional local library roots before downloading _(`--scan-path` flag)_
+- strict JSON config in a hidden media-root folder _(`hbd config init`)_
 
 ## Instructions
 
@@ -46,11 +51,167 @@ This directory structure will be used:
 If you already have a library downloaded but the cache file is missing or stale,
 you can rebuild it without downloading anything:
 `hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"`
-_To skip remote metadata lookups, add `--offline`_
+_To skip per-file HEAD metadata checks, add `--offline`; Humble library auth is still required._
 
 This scans your existing files, compares them against your Humble Bundle
 purchases, and updates `.cache.json` so future downloads only fetch missing or
-updated content.
+updated content. Audit and download also update a URL-free metadata snapshot for
+future organization and validation workflows.
+
+If your Humble library is split across multiple local folders, create a shared
+config under your media root:
+
+```powershell
+bun run hbd config init `
+  --media-root "C:\Users\me\Dropbox\Media" `
+  --default-library comics `
+  --library comics:"Comics\comics" `
+  --library books:"Books" `
+  --library manga:"Manga"
+```
+
+This creates:
+
+```text
+C:\Users\me\Dropbox\Media\.hbd\
+  config.json
+  cache.json
+  download-failures.json
+  metadata.json
+```
+
+When running from inside the media root, the CLI auto-discovers
+`.hbd/config.json`. You can also pass `--config <path>` or set `HBD_CONFIG`.
+Config lookup uses this order: `--config`, `HBD_CONFIG`, auto-discovery, then
+legacy CLI-only behavior.
+
+Configured libraries can use different format preferences. The generated
+defaults are:
+
+- `comics`: `cbz`, then `pdf`, then `epub`, then `mobi`
+- `manga`: `cbz`, then `pdf`, then `epub`, then `mobi`
+- `books`: `epub`, then `pdf`, then `mobi`
+
+When named libraries exist, `config init` also adds routes. Routes are evaluated
+per selected download candidate. Earlier routes take precedence, so broad bundle
+routes can keep Comic and Manga bundles together, while later product and format
+hints still help neutral bundles:
+
+```json
+{
+  "routes": [
+    {
+      "id": "manga-bundles",
+      "library": "manga",
+      "bundleTitlePatterns": ["\\bmanga\\s+bundle\\b"]
+    },
+    {
+      "id": "comic-bundles",
+      "library": "comics",
+      "bundleTitlePatterns": ["\\bcomics?\\s+bundle\\b"]
+    },
+    {
+      "id": "comic-formats",
+      "library": "comics",
+      "extensions": ["cbz"]
+    },
+    {
+      "id": "book-bundles",
+      "library": "books",
+      "bundleTitlePatterns": ["\\b(?:book bundle|ebooks?|e-books?|novels?)\\b"]
+    },
+    {
+      "id": "manga-products",
+      "library": "manga",
+      "productTitlePatterns": ["\\bmanga\\b"],
+      "filenamePatterns": ["\\bmanga\\b"]
+    },
+    {
+      "id": "book-products",
+      "library": "books",
+      "productTitlePatterns": ["\\b(?:book|ebook|e-book|novel|guide|author)\\b"],
+      "filenamePatterns": ["\\b(?:book|ebook|e-book|novel|guide)\\b"]
+    },
+    {
+      "id": "ebook-formats",
+      "library": "books",
+      "extensions": ["epub", "mobi"]
+    }
+  ]
+}
+```
+
+Routing uses config order as precedence. When nothing matches, downloads fall
+back to the active/default library.
+
+Run with the default configured library:
+
+```powershell
+bun run hbd audit --session-auth "COOKIE_VALUE"
+bun run hbd --session-auth "COOKIE_VALUE"
+```
+
+Choose a different configured download destination:
+
+```powershell
+bun run hbd --library books --session-auth "COOKIE_VALUE"
+```
+
+Check the setup before a long audit or download:
+
+```powershell
+bun run hbd doctor
+bun run hbd doctor --auth --session-auth "COOKIE_VALUE"
+bun run hbd doctor --deep --session-auth "COOKIE_VALUE"
+```
+
+`doctor` is read-only. The fast check validates config discovery, library paths,
+routes, format preferences, cache parsing, legacy cache files, and the failure
+report. `--auth` confirms the Humble library page is reachable without printing
+secrets. `--deep` fetches Humble metadata and compares the current selected
+downloads against cache and disk, reporting routing counts, ambiguous routing,
+cached-but-missing files, local uncached files, files in the wrong routed
+library, size mismatches, downloads that are not present yet, and cache entries
+no longer selected by the current config. Deep checks write a detailed report to
+`.hbd/doctor-report.json`.
+
+For slower integrity checks where Humble provides MD5 metadata, add `--hash`:
+
+```powershell
+bun run hbd doctor --deep --hash --session-auth "COOKIE_VALUE"
+```
+
+Preview moves that would put existing files into the library selected by the
+same routing rules used by audit and download:
+
+```powershell
+bun run hbd organize
+```
+
+`organize` reads `.hbd/metadata.json`, so run `audit` or `download` first after
+config changes. It is a dry run by default and only fixes files that are in the
+wrong routed library. To actually move files:
+
+```powershell
+bun run hbd organize --apply --report-path ".hbd/organize-report.json"
+```
+
+Add `--canonical` if you also want files already inside the right library moved
+into the standard bundle/product folder layout.
+
+Preview empty folders that can be removed from configured library roots:
+
+```powershell
+bun run hbd cleanup --report-path ".hbd/cleanup-dry-run.json"
+```
+
+`cleanup` is a dry run by default. It scans configured library roots, plans
+deepest folders first, and never removes the configured root folder itself. To
+actually remove empty folders:
+
+```powershell
+bun run hbd cleanup --apply --report-path ".hbd/cleanup-report.json"
+```
 
 ## Notes
 
@@ -72,6 +233,12 @@ updated content.
     }
   }
   ```
+
+- Audit and download write a `metadata.json` snapshot of Humble order titles,
+  product titles, filenames, extensions, platforms, sizes, and MD5 values when
+  available. Configured runs store it at `.hbd/metadata.json`; CLI-only runs
+  default to `<library-path>/.metadata.json`. Signed download URLs and auth
+  secrets are not stored.
 
 - Use `--help` with all `hbd` commands to see available options
 - Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
@@ -102,8 +269,10 @@ src/
   api/        # API clients and request helpers
   auth/       # session/auth handling
   cli/        # CLI entrypoints
+  cleanup/    # empty directory cleanup
   config/     # config resolution and defaults
   download/   # download orchestration
+  organize/   # local library organization
   utils/      # shared utilities
 ```
 
@@ -127,7 +296,15 @@ Common options mirrored from the Python CLI:
 
 - `-c, --cookie-file <path>`: Path to a Netscape cookie file.
 - `-s, --session-auth <value>`: `_simpleauth_sess` cookie value (wrap in quotes).
-- `-l, --library-path <path>`: Download directory (required).
+- `--config <path>`: Path to `.hbd/config.json`.
+- `--library <name>`: Configured library to use as the download destination.
+- `-l, --library-path <path>`: Download directory; required when no config is loaded.
+- `--scan-path <path...>`: Additional directory roots to scan for existing downloads before downloading.
+- `--cache-path <path>`: Cache file path; defaults to `<library-path>/.cache.json`.
+- `--metadata-path <path>`: Metadata snapshot file path; defaults to `<library-path>/.metadata.json`.
+- `hbd doctor`: Validate local setup, cache health, routing, and optional auth/deep metadata checks.
+- `hbd organize`: Move existing selected files into the routed library; dry-run by default, use `--apply` to move files. Add `--canonical` to also normalize folder layout inside the same library.
+- `hbd cleanup`: Remove empty folders from configured library roots; dry-run by default, use `--apply` to delete empty folders.
 - `-t, --trove`: Only download Humble Trove content.
 - `-u, --update`: Only check for updates.
 - `-p, --platform <platform...>`: Limit content by platform.
@@ -136,7 +313,6 @@ Common options mirrored from the Python CLI:
 - `-i, --include <ext...>`: Only include file extensions.
 - `--format-priority <ext...>`: Prefer file extensions in priority order (default: `cbz, epub, pdf, mobi`); if none are available, download all files for the product. Include/exclude filters apply before format selection.
 - `-k, --keys <key...>`: Limit to purchase keys.
-- `--format-priority <format...>`: Preferred format ordering for downloadable web files only (does not filter external links or ASM content).
 
 To rebuild the cache from existing files without downloading:
 
@@ -144,7 +320,11 @@ To rebuild the cache from existing files without downloading:
 bun run hbd audit --cookie-file cookies.txt --library-path "Downloaded Library"
 ```
 
-Add `--offline` to skip remote metadata lookups during audit runs.
+Add `--offline` to skip per-file HEAD metadata checks during audit runs. Audit
+still loads your Humble library metadata, so auth is still required.
+
+Config files are strict JSON and intentionally do not store auth secrets. Keep
+using `--session-auth` or `--cookie-file` when running commands.
 
 ### PDF → CBZ conversion
 

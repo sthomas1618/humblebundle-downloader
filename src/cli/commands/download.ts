@@ -2,15 +2,20 @@ import type { Command } from 'commander'
 
 import { createClient } from '../../api/client'
 import { createSession } from '../../auth/session'
-import { resolveConfig } from '../../config'
 import { downloadLibrary } from '../../download/downloader'
 import { validateAuth } from '../utils/auth'
+import { resolveCommandConfig } from '../utils/config'
 import { applyCommonOptions } from '../utils/options'
 
 type DownloadOptions = {
+  config?: string
+  library?: string
   cookieFile?: string
   sessionAuth?: string
-  libraryPath: string
+  libraryPath?: string
+  scanPath?: string[]
+  cachePath?: string
+  metadataPath?: string
   trove?: boolean
   update?: boolean
   platform?: string[]
@@ -27,34 +32,14 @@ export function registerDownloadCommand(program: Command): void {
   applyCommonOptions(program, {
     includeUpdate: true,
     includeProgress: true,
+    includeFormatPriority: true,
     requireLibraryPath: false,
   })
-  program.option(
-    '--format-priority <ext...>',
-    'Preferred file extensions in priority order; if none are available, download all files for the product'
-  )
   program.action(async () => {
     const options = program.optsWithGlobals<DownloadOptions>()
 
-    if (!options.libraryPath) {
-      program.error("required option '-l, --library-path <path>' not specified")
-    }
-
+    const { config } = await resolveCommandConfig(program, options)
     validateAuth(program, options)
-
-    const config = resolveConfig({
-      cookieFile: options.cookieFile,
-      sessionAuth: options.sessionAuth,
-      libraryPath: options.libraryPath,
-      troveOnly: options.trove,
-      showProgress: options.progress,
-      updateOnly: options.update,
-      platformInclude: options.platform,
-      extInclude: options.include,
-      extExclude: options.exclude,
-      formatPriority: options.formatPriority,
-      purchaseKeys: options.keys,
-    })
 
     const session = await createSession(config)
     const client = createClient(session)
@@ -76,8 +61,10 @@ export function registerDownloadCommand(program: Command): void {
       `Queued: ${summary.queued}.`,
       `Downloaded: ${summary.downloaded}.`,
       `Skipped: ${summary.skipped}.`,
+      `Already present: ${summary.locallySatisfied}.`,
       `Failed: ${summary.failed}.`,
       `Cache entries: ${summary.cacheEntries}.`,
+      `Metadata orders: ${summary.metadataOrders}.`,
     ]
     if (summary.failed > 0 && summary.failureReportPath) {
       summaryParts.push(`Failure report: ${summary.failureReportPath}.`)
