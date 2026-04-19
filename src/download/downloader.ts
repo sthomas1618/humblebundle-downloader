@@ -4,9 +4,16 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 import type { ApiClient } from '../api/client'
-import type { AppConfig } from '../config'
-import { buildProductFolder, buildTroveFolder, cleanName } from '../utils/fs'
+import type { AppConfig, ScanLibraryConfig } from '../config'
+import { buildProductFolder, buildTroveFolder, cleanName, hasSimilarTitle } from '../utils/fs'
 import { loadCache, saveCache, type CacheEntry } from './cache'
+import {
+  loadMetadata,
+  resolveMetadataPath,
+  saveMetadata,
+  upsertOrderMetadata,
+  type MetadataData,
+} from './metadata'
 
 /**
  * Inputs required to orchestrate downloads for the Humble Bundle library.
@@ -45,9 +52,12 @@ export type DownloadSummary = {
   queued: number
   downloaded: number
   skipped: number
+  locallySatisfied: number
   failed: number
   cacheEntries: number
   failureReportPath?: string
+  metadataOrders: number
+  metadataPath?: string
 }
 
 export type AuditSummary = {
@@ -58,6 +68,68 @@ export type AuditSummary = {
   cacheEntries: number
   selectedCandidates: number
   matchedFiles: number
+  metadataOrders: number
+  metadataPath?: string
+}
+
+export type DownloadInspectionItem = {
+  cacheKey: string
+  filename: string
+  platform: string
+  url: string
+  orderId: string
+  bundleTitle: string
+  productTitle: string
+  expectedLibraryName?: string
+  expectedLibraryPath: string
+  expectedDestination: string
+  expectedSize?: number
+  expectedMd5?: string
+  localPath?: string
+  cacheEntry?: CacheEntry
+  routing: CandidateRoutingDecision
+}
+
+export type DownloadInspection = {
+  purchaseKeys: number
+  ordersProcessed: number
+  productsProcessed: number
+  candidates: DownloadInspectionItem[]
+}
+
+export type RouteSignal = 'extension' | 'platform' | 'bundleTitle' | 'productTitle' | 'filename'
+
+export type CandidateRouteMatch = {
+  routeId: string
+  library: string
+  tier: number
+  specificity: number
+  signals: RouteSignal[]
+}
+
+export type CandidateRoutingDecision = {
+  libraryName?: string
+  libraryPath: string
+  tier: number
+  specificity: number
+  firstRouteIndex: number
+  fallback: boolean
+  ambiguous: boolean
+  matchedRoutes: CandidateRouteMatch[]
+}
+
+export type WebDownloadCandidate = {
+  filename: string
+  platform: string
+  url: string
+  fileSize?: number
+  md5?: string
+}
+
+export type RoutedDownloadCandidate = {
+  candidate: WebDownloadCandidate
+  library: ScanLibraryConfig
+  routing: CandidateRoutingDecision
 }
 
 function sleep(ms: number): Promise<void> {
@@ -191,7 +263,10 @@ async function downloadWithRetry(
   return { item, bytesWritten: 0, attempts: attempt }
 }
 
-export function shouldDownloadPlatform(platform: string, config: AppConfig): boolean {
+export function shouldDownloadPlatform(
+  platform: string,
+  config: Pick<AppConfig | ScanLibraryConfig, 'platformInclude'>
+): boolean {
   if (!config.platformInclude || config.platformInclude.length === 0) {
     return true
   }
@@ -202,7 +277,10 @@ export function shouldDownloadPlatform(platform: string, config: AppConfig): boo
   return normalized.has(platform.toLowerCase())
 }
 
-export function shouldDownloadExtension(filename: string, config: AppConfig): boolean {
+export function shouldDownloadExtension(
+  filename: string,
+  config: Pick<AppConfig | ScanLibraryConfig, 'extInclude' | 'extExclude'>
+): boolean {
   const extension = filename.split('.').pop()?.toLowerCase() ?? ''
   if (config.extInclude && config.extInclude.length > 0) {
     const normalizedInclude = new Set(config.extInclude.map((value) => value.toLowerCase()))
@@ -221,7 +299,7 @@ function getExtension(filename: string): string {
 
 export function selectPreferredDownloadCandidates<T extends { filename: string }>(
   candidates: T[],
-  config: AppConfig
+  config: Pick<AppConfig | ScanLibraryConfig, 'formatPriority'>
 ): T[] {
   const priority = config.formatPriority ?? []
   if (priority.length === 0 || candidates.length === 0) {
@@ -247,6 +325,289 @@ export function selectPreferredDownloadCandidates<T extends { filename: string }
   }
 
   return candidates
+}
+
+function getActiveDestinationLibrary(config: AppConfig): ScanLibraryConfig {
+  const configuredLibrary = config.libraryName
+    ? config.scanLibraries.find((library) => library.name === config.libraryName)
+    : undefined
+
+  return (
+    configuredLibrary ?? {
+      name: config.libraryName,
+      path: config.libraryPath,
+      platformInclude: config.platformInclude,
+      extInclude: config.extInclude,
+      extExclude: config.extExclude,
+      formatPriority: config.formatPriority,
+      troveOnly: config.troveOnly,
+      showProgress: config.showProgress,
+    }
+  )
+}
+
+function getConfiguredLibrary(config: AppConfig, name: string): ScanLibraryConfig | undefined {
+  return config.scanLibraries.find((library) => library.name === name)
+}
+
+type CandidateRouteContext = {
+  bundleTitle: string
+  productTitle: string
+}
+
+const routeSignalTiers: Record<RouteSignal, number> = {
+  extension: 1,
+  platform: 1,
+  bundleTitle: 1,
+  productTitle: 1,
+  filename: 1,
+}
+
+const routeSignalSpecificity: Record<RouteSignal, number> = {
+  extension: 1,
+  platform: 0,
+  bundleTitle: 2,
+  productTitle: 4,
+  filename: 3,
+}
+
+function getRouteId(index: number, library: string): string {
+  return `route-${index + 1}-${library}`
+}
+
+function routeTextVariants(value: string): string[] {
+  return [value, value.replaceAll(/[._-]+/g, ' ')]
+}
+
+function routePatternsMatch(value: string, patterns?: string[]): boolean {
+  if (!patterns || patterns.length === 0) {
+    return false
+  }
+
+  const variants = routeTextVariants(value)
+  return patterns.some((pattern) => {
+    const regex = new RegExp(pattern, 'i')
+    return variants.some((variant) => regex.test(variant))
+  })
+}
+
+function getMatchedRouteSignals(
+  candidate: WebDownloadCandidate,
+  context: CandidateRouteContext,
+  route: AppConfig['routes'][number]
+): RouteSignal[] {
+  const signals: RouteSignal[] = []
+  const extension = getExtension(candidate.filename)
+  const platforms = new Set(route.platforms ?? [])
+
+  if (route.extensions?.includes(extension)) {
+    signals.push('extension')
+  }
+  if (platforms.has(candidate.platform.toLowerCase()) || platforms.has('all')) {
+    signals.push('platform')
+  }
+  if (routePatternsMatch(context.bundleTitle, route.bundleTitlePatterns)) {
+    signals.push('bundleTitle')
+  }
+  if (routePatternsMatch(context.productTitle, route.productTitlePatterns)) {
+    signals.push('productTitle')
+  }
+  if (routePatternsMatch(candidate.filename, route.filenamePatterns)) {
+    signals.push('filename')
+  }
+
+  return signals
+}
+
+function getRouteMatchTier(signals: RouteSignal[]): number {
+  return Math.max(...signals.map((signal) => routeSignalTiers[signal]))
+}
+
+function getRouteMatchSpecificity(signals: RouteSignal[]): number {
+  return Math.max(...signals.map((signal) => routeSignalSpecificity[signal]))
+}
+
+function routeDownloadCandidate(
+  candidate: WebDownloadCandidate,
+  context: CandidateRouteContext,
+  config: AppConfig
+): { library: ScanLibraryConfig; routing: CandidateRoutingDecision } | undefined {
+  const activeLibrary = getActiveDestinationLibrary(config)
+  const libraryMatches = new Map<
+    string,
+    {
+      library: ScanLibraryConfig
+      tier: number
+      specificity: number
+      firstRouteIndex: number
+      matches: CandidateRouteMatch[]
+    }
+  >()
+
+  for (const [index, route] of config.routes.entries()) {
+    const library = getConfiguredLibrary(config, route.library)
+    if (
+      !library ||
+      !shouldDownloadPlatform(candidate.platform, library) ||
+      !shouldDownloadExtension(candidate.filename, library)
+    ) {
+      continue
+    }
+
+    const signals = getMatchedRouteSignals(candidate, context, route)
+    if (signals.length === 0) {
+      continue
+    }
+
+    const tier = getRouteMatchTier(signals)
+    const specificity = getRouteMatchSpecificity(signals)
+    const routeMatch: CandidateRouteMatch = {
+      routeId: route.id ?? getRouteId(index, route.library),
+      library: route.library,
+      tier,
+      specificity,
+      signals,
+    }
+    const current = libraryMatches.get(route.library)
+    if (!current) {
+      libraryMatches.set(route.library, {
+        library,
+        tier,
+        specificity,
+        firstRouteIndex: index,
+        matches: [routeMatch],
+      })
+      continue
+    }
+
+    current.matches.push(routeMatch)
+    if (tier > current.tier) {
+      current.tier = tier
+      current.specificity = specificity
+      current.firstRouteIndex = index
+      continue
+    }
+    if (tier === current.tier) {
+      if (specificity > current.specificity) {
+        current.specificity = specificity
+      }
+      if (index < current.firstRouteIndex) {
+        current.firstRouteIndex = index
+      }
+    }
+  }
+
+  if (libraryMatches.size === 0) {
+    if (
+      !shouldDownloadPlatform(candidate.platform, config) ||
+      !shouldDownloadExtension(candidate.filename, config)
+    ) {
+      return undefined
+    }
+    return {
+      library: activeLibrary,
+      routing: {
+        libraryName: activeLibrary.name,
+        libraryPath: activeLibrary.path,
+        tier: 0,
+        specificity: -1,
+        firstRouteIndex: Number.MAX_SAFE_INTEGER,
+        fallback: true,
+        ambiguous: false,
+        matchedRoutes: [],
+      },
+    }
+  }
+
+  const ranked = [...libraryMatches.values()].sort((left, right) => {
+    if (right.tier !== left.tier) {
+      return right.tier - left.tier
+    }
+    if (left.firstRouteIndex !== right.firstRouteIndex) {
+      return left.firstRouteIndex - right.firstRouteIndex
+    }
+    if (right.specificity !== left.specificity) {
+      return right.specificity - left.specificity
+    }
+    return 0
+  })
+  const winner = ranked[0]
+  if (!winner) {
+    return undefined
+  }
+  const ambiguous = ranked.some(
+    (candidateLibrary) =>
+      candidateLibrary !== winner &&
+      candidateLibrary.tier === winner.tier &&
+      candidateLibrary.firstRouteIndex === winner.firstRouteIndex &&
+      candidateLibrary.specificity === winner.specificity
+  )
+
+  return {
+    library: winner.library,
+    routing: {
+      libraryName: winner.library.name,
+      libraryPath: winner.library.path,
+      tier: winner.tier,
+      specificity: winner.specificity,
+      firstRouteIndex: winner.firstRouteIndex,
+      fallback: false,
+      ambiguous,
+      matchedRoutes: winner.matches,
+    },
+  }
+}
+
+export function selectRoutedDownloadCandidates(
+  candidates: WebDownloadCandidate[],
+  config: AppConfig,
+  context: CandidateRouteContext
+): RoutedDownloadCandidate[] {
+  const routedCandidates = candidates
+    .map((candidate) => {
+      const decision = routeDownloadCandidate(candidate, context, config)
+      return decision ? { candidate, ...decision } : undefined
+    })
+    .filter((candidate): candidate is RoutedDownloadCandidate => candidate !== undefined)
+
+  if (routedCandidates.length === 0) {
+    return []
+  }
+
+  const bestTier = Math.max(...routedCandidates.map((candidate) => candidate.routing.tier))
+  const bestCandidates = routedCandidates.filter((candidate) => candidate.routing.tier === bestTier)
+  const selectedByLibrary = new Map<string, RoutedDownloadCandidate[]>()
+  for (const routedCandidate of bestCandidates) {
+    const key = routedCandidate.library.name ?? routedCandidate.library.path
+    const matches = selectedByLibrary.get(key) ?? []
+    matches.push(routedCandidate)
+    selectedByLibrary.set(key, matches)
+  }
+
+  let selected: RoutedDownloadCandidate[] = []
+  for (const matches of selectedByLibrary.values()) {
+    const library = matches[0]?.library
+    if (!library) {
+      continue
+    }
+    const selectedCandidates = selectPreferredDownloadCandidates(
+      matches.map((match) => match.candidate),
+      library
+    )
+    selected.push(...matches.filter((match) => selectedCandidates.includes(match.candidate)))
+  }
+
+  const bestRouteIndex = Math.min(...selected.map((candidate) => candidate.routing.firstRouteIndex))
+  selected = selected.filter((candidate) => candidate.routing.firstRouteIndex === bestRouteIndex)
+  const firstSelected = selected[0]
+  if (!firstSelected) {
+    return []
+  }
+
+  const winnerKey = firstSelected.library.name ?? firstSelected.library.path
+  return selected.filter(
+    (candidate) => (candidate.library.name ?? candidate.library.path) === winnerKey
+  )
 }
 
 function getFilenameFromUrl(url: string): string {
@@ -279,6 +640,7 @@ type DownloadFailureReport = {
 }
 
 const DOWNLOAD_FAILURES_FILE = '.download-failures.json'
+const METADATA_SAVE_INTERVAL = 25
 
 function parseAsmPlayerData(html: string): AsmManifest | undefined {
   const match = html.match(/id=["']webpack-asm-player-data["'][^>]*>([^<]+)<\/[^>]+>/i)
@@ -508,7 +870,16 @@ export async function downloadLibrary({
   config,
   onProgress,
 }: DownloadContext): Promise<DownloadSummary> {
-  const cache = await loadCache(config.libraryPath)
+  const cache = await loadCache(config.libraryPath, config.cachePath)
+  const metadata: MetadataData | undefined = config.troveOnly
+    ? undefined
+    : await loadMetadata(config.libraryPath, config.metadataPath)
+  const metadataPath = metadata
+    ? resolveMetadataPath(config.libraryPath, config.metadataPath)
+    : undefined
+  const scanPaths = getScanPaths(config)
+  emitProgress(onProgress, 'Indexing local files...')
+  const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
   emitProgress(onProgress, 'Loading Humble library metadata...')
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -520,6 +891,8 @@ export async function downloadLibrary({
   }
 
   const items: DownloadItem[] = []
+  let locallySatisfied = 0
+  let metadataUpdatesSinceSave = 0
 
   if (config.troveOnly) {
     emitProgress(onProgress, 'Loading Trove catalog...')
@@ -533,7 +906,19 @@ export async function downloadLibrary({
       orderIndex += 1
       emitProgress(onProgress, `Scanning order ${orderIndex}/${purchaseKeys.length}...`)
       const order = await client.getOrderDetails(orderId)
+      if (metadata) {
+        upsertOrderMetadata(metadata, orderId, order)
+        metadataUpdatesSinceSave += 1
+        if (metadataUpdatesSinceSave >= METADATA_SAVE_INTERVAL) {
+          await saveMetadata(config.libraryPath, metadata, config.metadataPath)
+          metadataUpdatesSinceSave = 0
+        }
+      }
       const bundleTitle = order.product.human_name
+      const inferredBundleFolder = inferBundleFolder(
+        localDirectoryIndex,
+        getAuditWebDownloadFilenames(order, config)
+      )
 
       for (const product of order.subproducts) {
         const productFolder = buildProductFolder(
@@ -541,30 +926,25 @@ export async function downloadLibrary({
           bundleTitle,
           product.human_name
         )
-        const webCandidates: Array<{
-          filename: string
-          url: string
-          fileSize?: number
-          md5?: string
-        }> = []
+        const webCandidates: WebDownloadCandidate[] = []
 
         for (const downloadType of product.downloads) {
-          if (!shouldDownloadPlatform(downloadType.platform, config)) {
-            continue
-          }
+          const activePlatformAccepted = shouldDownloadPlatform(downloadType.platform, config)
 
           for (const fileType of downloadType.download_struct) {
             if (fileType.url?.web) {
               const filename = getFilenameFromUrl(fileType.url.web)
-              if (!shouldDownloadExtension(filename, config)) {
-                continue
-              }
               webCandidates.push({
                 filename,
+                platform: downloadType.platform,
                 url: fileType.url.web,
                 fileSize: fileType.file_size,
                 md5: fileType.md5,
               })
+              continue
+            }
+
+            if (!activePlatformAccepted) {
               continue
             }
 
@@ -651,17 +1031,44 @@ export async function downloadLibrary({
           }
         }
 
-        const selectedCandidates = selectPreferredDownloadCandidates(webCandidates, config)
-        for (const candidate of selectedCandidates) {
+        const selectedCandidates = selectRoutedDownloadCandidates(webCandidates, config, {
+          bundleTitle,
+          productTitle: product.human_name,
+        })
+        for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
           const cacheEntry = cache[cacheKey]
           if (cacheEntry && !config.updateOnly) {
             continue
           }
+          const localPath = await findAuditFile(
+            await buildAuditCandidatePaths(
+              scanPaths,
+              bundleTitle,
+              product.human_name,
+              inferredBundleFolder?.path,
+              candidate.filename
+            ),
+            candidate.filename,
+            config,
+            localDirectoryIndex,
+            inferredBundleFolder,
+            routing.fallback ? undefined : library
+          )
+          if (localPath) {
+            locallySatisfied += 1
+            cache[cacheKey] = {
+              urlLastModified: new Date().toUTCString(),
+            }
+            continue
+          }
 
           items.push({
             url: candidate.url,
-            destination: path.join(productFolder, candidate.filename),
+            destination: path.join(
+              buildProductFolder(library.path, bundleTitle, product.human_name),
+              candidate.filename
+            ),
             label: candidate.filename,
             orderId,
             bundleTitle,
@@ -677,7 +1084,8 @@ export async function downloadLibrary({
   }
 
   emitProgress(onProgress, `Queued ${items.length} download item(s).`)
-  const failureReportPath = path.join(config.libraryPath, DOWNLOAD_FAILURES_FILE)
+  const failureReportPath =
+    config.failureReportPath ?? path.join(config.libraryPath, DOWNLOAD_FAILURES_FILE)
   const failureReport = createFailureReport(config.libraryPath, items.length)
   await saveFailureReport(failureReportPath, failureReport)
   let cacheUpdatesSinceSave = 0
@@ -714,7 +1122,7 @@ export async function downloadLibrary({
     }
 
     if (cacheUpdatesSinceSave >= 25 || index === total) {
-      await saveCache(config.libraryPath, cache)
+      await saveCache(config.libraryPath, cache, config.cachePath)
       cacheUpdatesSinceSave = 0
     }
 
@@ -732,18 +1140,137 @@ export async function downloadLibrary({
     )
   }
 
-  await saveCache(config.libraryPath, cache)
+  await saveCache(config.libraryPath, cache, config.cachePath)
   await saveFailureReport(failureReportPath, failureReport)
+  if (metadata) {
+    await saveMetadata(config.libraryPath, metadata, config.metadataPath)
+    emitProgress(onProgress, `Wrote metadata for ${Object.keys(metadata.orders).length} order(s).`)
+  }
 
   return {
     purchaseKeys: purchaseKeys.length,
     queued: items.length,
     downloaded: results.filter((result) => !result.skipped && !result.error).length,
     skipped: results.filter((result) => result.skipped).length,
+    locallySatisfied,
     failed: results.filter((result) => result.error).length,
     cacheEntries: Object.keys(cache).filter((key) => key !== 'transforms').length,
     failureReportPath,
+    metadataOrders: metadata ? Object.keys(metadata.orders).length : 0,
+    metadataPath,
   }
+}
+
+export async function inspectDownloadState({
+  client,
+  config,
+  cache,
+  onProgress,
+}: DownloadContext & {
+  cache: Record<string, CacheEntry>
+}): Promise<DownloadInspection> {
+  const scanPaths = getScanPaths(config)
+  emitProgress(onProgress, 'Indexing local files...')
+  const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
+  emitProgress(onProgress, 'Loading Humble library metadata...')
+  const purchaseKeys =
+    config.purchaseKeys && config.purchaseKeys.length > 0
+      ? config.purchaseKeys
+      : parsePurchaseKeysFromLibraryPage(await client.getLibraryPage())
+
+  if (purchaseKeys.length === 0 && !config.troveOnly) {
+    throw new Error('Unable to determine purchase keys from the library page.')
+  }
+
+  const inspection: DownloadInspection = {
+    purchaseKeys: purchaseKeys.length,
+    ordersProcessed: 0,
+    productsProcessed: 0,
+    candidates: [],
+  }
+
+  if (config.troveOnly) {
+    return inspection
+  }
+
+  let orderIndex = 0
+  for (const orderId of purchaseKeys) {
+    orderIndex += 1
+    emitProgress(onProgress, `Inspecting order ${orderIndex}/${purchaseKeys.length}...`)
+    const order = await client.getOrderDetails(orderId)
+    inspection.ordersProcessed += 1
+    const bundleTitle = order.product.human_name
+    const inferredBundleFolder = inferBundleFolder(
+      localDirectoryIndex,
+      getAuditWebDownloadFilenames(order, config)
+    )
+
+    for (const product of order.subproducts) {
+      inspection.productsProcessed += 1
+      const webCandidates: WebDownloadCandidate[] = []
+
+      for (const downloadType of product.downloads) {
+        for (const fileType of downloadType.download_struct) {
+          if (!fileType.url?.web) {
+            continue
+          }
+          webCandidates.push({
+            filename: getFilenameFromUrl(fileType.url.web),
+            platform: downloadType.platform,
+            url: fileType.url.web,
+            fileSize: fileType.file_size,
+            md5: fileType.md5,
+          })
+        }
+      }
+
+      const selectedCandidates = selectRoutedDownloadCandidates(webCandidates, config, {
+        bundleTitle,
+        productTitle: product.human_name,
+      })
+      for (const { candidate, library, routing } of selectedCandidates) {
+        const cacheKey = `${orderId}:${candidate.filename}`
+        const expectedDestination = path.join(
+          buildProductFolder(library.path, bundleTitle, product.human_name),
+          candidate.filename
+        )
+        const localPath = await findAuditFile(
+          await buildAuditCandidatePaths(
+            scanPaths,
+            bundleTitle,
+            product.human_name,
+            inferredBundleFolder?.path,
+            candidate.filename
+          ),
+          candidate.filename,
+          config,
+          localDirectoryIndex,
+          inferredBundleFolder,
+          routing.fallback ? undefined : library
+        )
+
+        inspection.candidates.push({
+          cacheKey,
+          filename: candidate.filename,
+          platform: candidate.platform,
+          url: candidate.url,
+          orderId,
+          bundleTitle,
+          productTitle: product.human_name,
+          expectedLibraryName: library.name,
+          expectedLibraryPath: library.path,
+          expectedDestination,
+          expectedSize: candidate.fileSize,
+          expectedMd5: candidate.md5,
+          localPath,
+          cacheEntry: cache[cacheKey],
+          routing,
+        })
+      }
+    }
+  }
+
+  return inspection
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -786,22 +1313,26 @@ async function findExistingDirectory(
   directoryName: string
 ): Promise<string | undefined> {
   const cleanedName = cleanName(directoryName)
-  const directCandidates = [path.join(parent, cleanedName), path.join(parent, directoryName)]
-
-  for (const candidate of directCandidates) {
-    if (await fileExists(candidate)) {
-      return candidate
-    }
-  }
-
   try {
     const expected = cleanedName.toLowerCase()
     const entries = await readdir(parent, { withFileTypes: true })
     const match = entries.find(
       (entry) => entry.isDirectory() && cleanName(entry.name).toLowerCase() === expected
     )
-    return match ? path.join(parent, match.name) : undefined
+    if (match) {
+      return path.join(parent, match.name)
+    }
+    const similarMatches = entries.filter(
+      (entry) => entry.isDirectory() && hasSimilarTitle(entry.name, directoryName)
+    )
+    return similarMatches.length === 1 ? path.join(parent, similarMatches[0]!.name) : undefined
   } catch {
+    const directCandidates = [path.join(parent, cleanedName), path.join(parent, directoryName)]
+    for (const candidate of directCandidates) {
+      if (await fileExists(candidate)) {
+        return candidate
+      }
+    }
     return undefined
   }
 }
@@ -810,8 +1341,27 @@ function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths)]
 }
 
-type LocalDirectoryIndex = {
-  rootPath: string
+export function getScanPaths(config: AppConfig): string[] {
+  return uniquePaths(config.scanPaths.length > 0 ? config.scanPaths : [config.libraryPath])
+}
+
+function getAuditSelectionConfigs(config: AppConfig): Array<AppConfig | ScanLibraryConfig> {
+  return config.hasConfiguredLibraries ? config.scanLibraries : [config]
+}
+
+function isPathInside(parent: string, candidate: string): boolean {
+  const relativePath = path.relative(parent, candidate)
+  return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+}
+
+function getLocalScanLibrary(localPath: string, config: AppConfig): ScanLibraryConfig | undefined {
+  return config.scanLibraries
+    .filter((library) => isPathInside(path.resolve(library.path), path.resolve(localPath)))
+    .sort((left, right) => right.path.length - left.path.length)[0]
+}
+
+export type LocalDirectoryIndex = {
+  rootPaths: string[]
   rootFiles: Map<string, string>
   rootAliases: Map<string, string[]>
   topLevelDirectories: Array<{
@@ -880,30 +1430,36 @@ function addAlias(aliases: Map<string, string[]>, alias: string, filePath: strin
   aliases.set(alias, matches)
 }
 
-async function buildAuditCandidatePaths(
-  libraryPath: string,
+export async function buildAuditCandidatePaths(
+  libraryPaths: string[],
   bundleTitle: string,
   productTitle: string,
   inferredBundleFolder: string | undefined,
   ...segments: string[]
 ): Promise<string[]> {
-  const defaultBundleFolder = path.join(libraryPath, cleanName(bundleTitle))
-  const bundleFolder =
-    inferredBundleFolder ??
-    (await findExistingDirectory(libraryPath, bundleTitle)) ??
-    defaultBundleFolder
-  const defaultProductFolder = path.join(bundleFolder, cleanName(productTitle))
-  const productFolder =
-    (await findExistingDirectory(bundleFolder, productTitle)) ??
-    buildProductFolder(libraryPath, bundleTitle, productTitle)
+  const paths: string[] = []
 
-  return uniquePaths([
-    path.join(productFolder, ...segments),
-    path.join(defaultProductFolder, ...segments),
-    path.join(bundleFolder, ...segments),
-    path.join(defaultBundleFolder, ...segments),
-    path.join(libraryPath, ...segments),
-  ])
+  for (const libraryPath of libraryPaths) {
+    const defaultBundleFolder = path.join(libraryPath, cleanName(bundleTitle))
+    const bundleFolder =
+      inferredBundleFolder ??
+      (await findExistingDirectory(libraryPath, bundleTitle)) ??
+      defaultBundleFolder
+    const defaultProductFolder = path.join(bundleFolder, cleanName(productTitle))
+    const productFolder =
+      (await findExistingDirectory(bundleFolder, productTitle)) ??
+      buildProductFolder(libraryPath, bundleTitle, productTitle)
+
+    paths.push(
+      path.join(productFolder, ...segments),
+      path.join(defaultProductFolder, ...segments),
+      path.join(bundleFolder, ...segments),
+      path.join(defaultBundleFolder, ...segments),
+      path.join(libraryPath, ...segments)
+    )
+  }
+
+  return uniquePaths(paths)
 }
 
 async function findExistingPath(paths: string[]): Promise<string | undefined> {
@@ -955,64 +1511,79 @@ async function collectFiles(directory: string): Promise<{
   return { files, aliases }
 }
 
-async function buildLocalDirectoryIndex(root: string): Promise<LocalDirectoryIndex> {
+export async function buildLocalDirectoryIndex(
+  scanRoots: string | string[]
+): Promise<LocalDirectoryIndex> {
+  const rootPaths = uniquePaths(Array.isArray(scanRoots) ? scanRoots : [scanRoots])
   const index: LocalDirectoryIndex = {
-    rootPath: root,
+    rootPaths,
     rootFiles: new Map(),
     rootAliases: new Map(),
     topLevelDirectories: [],
   }
 
-  let entries
-  try {
-    entries = await readdir(root, { withFileTypes: true })
-  } catch {
-    return index
-  }
-
-  for (const entry of entries) {
-    const entryPath = path.join(root, entry.name)
-    if (entry.isFile()) {
-      index.rootFiles.set(entry.name.toLowerCase(), entryPath)
-      for (const alias of buildFilenameAliases(entry.name)) {
-        addAlias(index.rootAliases, alias, entryPath)
-      }
+  for (const root of rootPaths) {
+    let entries
+    try {
+      entries = await readdir(root, { withFileTypes: true })
+    } catch {
       continue
     }
 
-    if (entry.isDirectory()) {
-      const directoryFiles = await collectFiles(entryPath)
-      index.topLevelDirectories.push({
-        path: entryPath,
-        files: directoryFiles.files,
-        aliases: directoryFiles.aliases,
-      })
+    for (const entry of entries) {
+      const entryPath = path.join(root, entry.name)
+      if (entry.isFile()) {
+        index.rootFiles.set(entry.name.toLowerCase(), entryPath)
+        for (const alias of buildFilenameAliases(entry.name)) {
+          addAlias(index.rootAliases, alias, entryPath)
+        }
+        continue
+      }
+
+      if (entry.isDirectory()) {
+        const directoryFiles = await collectFiles(entryPath)
+        index.topLevelDirectories.push({
+          path: entryPath,
+          files: directoryFiles.files,
+          aliases: directoryFiles.aliases,
+        })
+      }
     }
   }
 
   return index
 }
 
-async function findAuditFile(
+export async function findAuditFile(
   paths: string[],
   filename: string,
   config: AppConfig,
   localDirectoryIndex: LocalDirectoryIndex,
-  inferredBundleFolder?: LocalDirectoryIndex['topLevelDirectories'][number]
+  inferredBundleFolder?: LocalDirectoryIndex['topLevelDirectories'][number],
+  formatConfig?: Pick<AppConfig | ScanLibraryConfig, 'formatPriority'>,
+  options: { allowEquivalentFormats?: boolean; allowGlobalAliasMatches?: boolean } = {}
 ): Promise<string | undefined> {
   const normalizedFilename = filename.toLowerCase()
+  const allowEquivalentFormats = options.allowEquivalentFormats ?? true
   const aliasMatches = buildFilenameAliases(filename)
     .flatMap((alias) => [
       ...(inferredBundleFolder?.aliases.get(alias) ?? []),
+      ...(options.allowGlobalAliasMatches
+        ? localDirectoryIndex.topLevelDirectories.flatMap(
+            (directory) => directory.aliases.get(alias) ?? []
+          )
+        : []),
       ...(localDirectoryIndex.rootAliases.get(alias) ?? []),
     ])
     .filter((match, index, matches) => matches.indexOf(match) === index)
-    .filter((match) => canLocalFormatSatisfyRemote(filename, match, config))
+    .filter((match) =>
+      canLocalFormatSatisfyRemote(filename, match, config, formatConfig, allowEquivalentFormats)
+    )
   const candidateDirectoryMatches: string[] = []
 
   for (const candidate of paths) {
     const directory = path.dirname(candidate)
-    if (directory === localDirectoryIndex.rootPath || !(await fileExists(directory))) {
+    if (localDirectoryIndex.rootPaths.includes(directory) || !(await fileExists(directory))) {
       continue
     }
     const directoryFiles = await collectFiles(directory)
@@ -1023,7 +1594,9 @@ async function findAuditFile(
 
   const uniqueCandidateDirectoryMatches = candidateDirectoryMatches
     .filter((match, index, matches) => matches.indexOf(match) === index)
-    .filter((match) => canLocalFormatSatisfyRemote(filename, match, config))
+    .filter((match) =>
+      canLocalFormatSatisfyRemote(filename, match, config, formatConfig, allowEquivalentFormats)
+    )
 
   return (
     (await findExistingPath(paths)) ??
@@ -1036,7 +1609,10 @@ async function findAuditFile(
   )
 }
 
-function getFormatPreferenceRank(filename: string, config: AppConfig): number {
+function getFormatPreferenceRank(
+  filename: string,
+  config: Pick<AppConfig | ScanLibraryConfig, 'formatPriority'>
+): number {
   const priority = config.formatPriority ?? []
   const extension = getExtension(filename)
   const index = priority.indexOf(extension)
@@ -1046,29 +1622,41 @@ function getFormatPreferenceRank(filename: string, config: AppConfig): number {
 function canLocalFormatSatisfyRemote(
   remoteFilename: string,
   localPath: string,
-  config: AppConfig
+  config: AppConfig,
+  formatConfig?: Pick<AppConfig | ScanLibraryConfig, 'formatPriority'>,
+  allowEquivalentFormats = true
 ): boolean {
   const remoteExtension = getExtension(remoteFilename)
   const localExtension = getExtension(path.basename(localPath))
   if (localExtension === remoteExtension) {
     return true
   }
-  if (remoteExtension === 'pdf' && (localExtension === 'epub' || localExtension === 'mobi')) {
+  if (!allowEquivalentFormats) {
+    return false
+  }
+  const localConfig = getLocalScanLibrary(localPath, config) ?? config
+
+  if (
+    !config.hasConfiguredLibraries &&
+    remoteExtension === 'pdf' &&
+    (localExtension === 'epub' || localExtension === 'mobi')
+  ) {
     return true
   }
 
-  const priority = config.formatPriority ?? []
+  const prioritySource = formatConfig ?? localConfig
+  const priority = prioritySource.formatPriority ?? []
   if (!priority.includes(localExtension) || !priority.includes(remoteExtension)) {
     return false
   }
 
   return (
-    getFormatPreferenceRank(path.basename(localPath), config) <=
-    getFormatPreferenceRank(remoteFilename, config)
+    getFormatPreferenceRank(path.basename(localPath), prioritySource) <=
+    getFormatPreferenceRank(remoteFilename, prioritySource)
   )
 }
 
-function inferBundleFolder(
+export function inferBundleFolder(
   localDirectoryIndex: LocalDirectoryIndex,
   expectedFilenames: Set<string>
 ): LocalDirectoryIndex['topLevelDirectories'][number] | undefined {
@@ -1110,7 +1698,7 @@ function inferBundleFolder(
 
 function getWebDownloadFilenames(
   order: Awaited<ReturnType<ApiClient['getOrderDetails']>>,
-  config: AppConfig
+  config: Pick<AppConfig | ScanLibraryConfig, 'platformInclude' | 'extInclude' | 'extExclude'>
 ): Set<string> {
   const filenames = new Set<string>()
 
@@ -1136,19 +1724,36 @@ function getWebDownloadFilenames(
   return filenames
 }
 
+function getAuditWebDownloadFilenames(
+  order: Awaited<ReturnType<ApiClient['getOrderDetails']>>,
+  config: AppConfig
+): Set<string> {
+  const filenames = new Set<string>()
+  for (const selectionConfig of getAuditSelectionConfigs(config)) {
+    for (const filename of getWebDownloadFilenames(order, selectionConfig)) {
+      filenames.add(filename)
+    }
+  }
+  return filenames
+}
+
 export async function auditLibrary({
   client,
   config,
   onProgress,
 }: DownloadContext): Promise<AuditSummary> {
   emitProgress(onProgress, 'Loading existing cache...')
-  const existingCache = await loadCache(config.libraryPath)
+  const existingCache = await loadCache(config.libraryPath, config.cachePath)
   const cache: Record<string, CacheEntry> = {}
   if (existingCache.transforms) {
     Object.assign(cache, { transforms: existingCache.transforms })
   }
+  const metadata: MetadataData | undefined = config.troveOnly
+    ? undefined
+    : await loadMetadata(config.libraryPath, config.metadataPath)
   emitProgress(onProgress, 'Indexing local files...')
-  const localDirectoryIndex = await buildLocalDirectoryIndex(config.libraryPath)
+  const scanPaths = getScanPaths(config)
+  const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
   emitProgress(onProgress, 'Loading Humble library metadata...')
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -1168,7 +1773,12 @@ export async function auditLibrary({
     cacheEntries: 0,
     selectedCandidates: 0,
     matchedFiles: 0,
+    metadataOrders: metadata ? Object.keys(metadata.orders).length : 0,
+    metadataPath: metadata
+      ? resolveMetadataPath(config.libraryPath, config.metadataPath)
+      : undefined,
   }
+  let metadataUpdatesSinceSave = 0
 
   if (config.troveOnly) {
     emitProgress(onProgress, 'Loading Trove catalog...')
@@ -1217,36 +1827,55 @@ export async function auditLibrary({
       emitProgress(onProgress, `Auditing order ${orderIndex}/${purchaseKeys.length}...`)
       const order = await client.getOrderDetails(orderId)
       summary.ordersProcessed += 1
+      if (metadata) {
+        upsertOrderMetadata(metadata, orderId, order)
+        metadataUpdatesSinceSave += 1
+        if (metadataUpdatesSinceSave >= METADATA_SAVE_INTERVAL) {
+          await saveMetadata(config.libraryPath, metadata, config.metadataPath)
+          metadataUpdatesSinceSave = 0
+        }
+      }
       const bundleTitle = order.product.human_name
       const inferredBundleFolder = inferBundleFolder(
         localDirectoryIndex,
-        getWebDownloadFilenames(order, config)
+        getAuditWebDownloadFilenames(order, config)
       )
 
       for (const product of order.subproducts) {
         summary.productsProcessed += 1
         const webCandidates: Array<{
           filename: string
+          platform: string
           url: string
         }> = []
 
         for (const downloadType of product.downloads) {
-          if (!shouldDownloadPlatform(downloadType.platform, config)) {
-            continue
-          }
+          const platformAcceptedForAudit = getAuditSelectionConfigs(config).some(
+            (selectionConfig) => shouldDownloadPlatform(downloadType.platform, selectionConfig)
+          )
 
           for (const fileType of downloadType.download_struct) {
             if (fileType.url?.web) {
               const filename = getFilenameFromUrl(fileType.url.web)
-              if (!shouldDownloadExtension(filename, config)) {
-                continue
-              }
 
               webCandidates.push({
                 filename,
+                platform: downloadType.platform,
                 url: fileType.url.web,
               })
-              summary.candidatesConsidered += 1
+              if (
+                getAuditSelectionConfigs(config).some(
+                  (selectionConfig) =>
+                    shouldDownloadPlatform(downloadType.platform, selectionConfig) &&
+                    shouldDownloadExtension(filename, selectionConfig)
+                )
+              ) {
+                summary.candidatesConsidered += 1
+              }
+              continue
+            }
+
+            if (!platformAcceptedForAudit) {
               continue
             }
 
@@ -1259,7 +1888,7 @@ export async function auditLibrary({
 
               const localFolder = await findExistingPath(
                 await buildAuditCandidatePaths(
-                  config.libraryPath,
+                  scanPaths,
                   bundleTitle,
                   product.human_name,
                   inferredBundleFolder?.path,
@@ -1324,13 +1953,16 @@ export async function auditLibrary({
           }
         }
 
-        const selectedCandidates = selectPreferredDownloadCandidates(webCandidates, config)
+        const selectedCandidates = selectRoutedDownloadCandidates(webCandidates, config, {
+          bundleTitle,
+          productTitle: product.human_name,
+        })
         summary.selectedCandidates += selectedCandidates.length
-        for (const candidate of selectedCandidates) {
+        for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
           const localPath = await findAuditFile(
             await buildAuditCandidatePaths(
-              config.libraryPath,
+              scanPaths,
               bundleTitle,
               product.human_name,
               inferredBundleFolder?.path,
@@ -1339,7 +1971,8 @@ export async function auditLibrary({
             candidate.filename,
             config,
             localDirectoryIndex,
-            inferredBundleFolder
+            inferredBundleFolder,
+            routing.fallback ? undefined : library
           )
           if (!localPath) {
             continue
@@ -1357,8 +1990,13 @@ export async function auditLibrary({
     }
   }
 
-  await saveCache(config.libraryPath, cache)
+  await saveCache(config.libraryPath, cache, config.cachePath)
   summary.cacheEntries = Object.keys(cache).filter((key) => key !== 'transforms').length
   emitProgress(onProgress, `Wrote ${summary.cacheEntries} cache entries.`)
+  if (metadata) {
+    await saveMetadata(config.libraryPath, metadata, config.metadataPath)
+    summary.metadataOrders = Object.keys(metadata.orders).length
+    emitProgress(onProgress, `Wrote metadata for ${summary.metadataOrders} order(s).`)
+  }
   return summary
 }

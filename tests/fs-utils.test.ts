@@ -4,7 +4,13 @@ import path from 'node:path'
 
 import { describe, expect, it } from 'bun:test'
 
-import { buildProductFolder, buildTroveFolder, cleanName, ensureDirectory } from '../src/utils/fs'
+import {
+  buildProductFolder,
+  buildTroveFolder,
+  cleanName,
+  ensureDirectory,
+  hasSimilarTitle,
+} from '../src/utils/fs'
 
 describe('fs utils', () => {
   it('cleans names using Python-aligned normalization', () => {
@@ -18,6 +24,22 @@ describe('fs utils', () => {
     const folder = buildProductFolder('/downloads', 'Bundle:Name', 'Product+1')
 
     expect(folder).toBe(path.join('/downloads', 'Bundle -Name', 'Product_1'))
+  })
+
+  it('matches shortened legacy bundle titles to Humble titles', () => {
+    expect(
+      hasSimilarTitle(
+        'MICROIDS GAMES & COMICS CROSSOVER COLLECTION',
+        'Microids: Games & Comics Crossover Collection'
+      )
+    ).toBe(true)
+    expect(
+      hasSimilarTitle(
+        'FORBIDDEN BOOKS SUPPORTING BANNED BOOKS WEEK 2018',
+        'Humble Book Bundle: Forbidden Books supporting Banned Books Week 2018'
+      )
+    ).toBe(true)
+    expect(hasSimilarTitle("BACK TO THE '80S BY IDW", 'Humble Book Bundle: Geek Gals')).toBe(false)
   })
 
   it('builds trove folder paths', () => {

@@ -1,4 +1,4 @@
-import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 export type CacheEntry = {
@@ -36,6 +36,10 @@ export type CacheData = Record<string, CacheEntry> & {
 }
 
 const CACHE_FILE = '.cache.json'
+
+export function resolveCachePath(libraryPath: string, cachePath?: string): string {
+  return cachePath ? path.resolve(cachePath) : path.join(libraryPath, CACHE_FILE)
+}
 
 function defaultPdfCbzCache(): PdfCbzCache {
   return {
@@ -102,9 +106,9 @@ export function shouldRegeneratePdfCbz(
   return entry.pdfMtimeMs !== stats.mtimeMs || entry.pdfSize !== stats.size
 }
 
-export async function loadCache(libraryPath: string): Promise<CacheData> {
+export async function loadCache(libraryPath: string, cachePath?: string): Promise<CacheData> {
   try {
-    const data = await readFile(path.join(libraryPath, CACHE_FILE), 'utf8')
+    const data = await readFile(resolveCachePath(libraryPath, cachePath), 'utf8')
     return normalizeCache(JSON.parse(data))
   } catch (error) {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
@@ -114,10 +118,15 @@ export async function loadCache(libraryPath: string): Promise<CacheData> {
   }
 }
 
-export async function saveCache(libraryPath: string, cache: CacheData): Promise<void> {
+export async function saveCache(
+  libraryPath: string,
+  cache: CacheData,
+  cachePathOverride?: string
+): Promise<void> {
   const payload = JSON.stringify(cache, undefined, 2)
-  const cachePath = path.join(libraryPath, CACHE_FILE)
-  const temporaryPath = path.join(libraryPath, `${CACHE_FILE}.tmp`)
+  const cachePath = resolveCachePath(libraryPath, cachePathOverride)
+  const temporaryPath = `${cachePath}.tmp`
+  await mkdir(path.dirname(cachePath), { recursive: true })
   await writeFile(temporaryPath, payload)
   try {
     await rename(temporaryPath, cachePath)

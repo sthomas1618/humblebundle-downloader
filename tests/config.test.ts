@@ -6,10 +6,22 @@ describe('resolveConfig', () => {
   it('returns defaults when no overrides are provided', () => {
     const config = resolveConfig({})
 
-    expect(config).toEqual({
+    expect(config).toMatchObject({
       cookieFile: undefined,
       sessionAuth: undefined,
       libraryPath: 'Downloaded Library',
+      scanPaths: ['Downloaded Library'],
+      scanLibraries: [
+        {
+          path: 'Downloaded Library',
+          formatPriority: ['cbz', 'epub', 'pdf', 'mobi'],
+        },
+      ],
+      cachePath: undefined,
+      failureReportPath: undefined,
+      metadataPath: undefined,
+      hasConfiguredLibraries: false,
+      routes: [],
       troveOnly: false,
       showProgress: false,
       updateOnly: false,
@@ -27,6 +39,9 @@ describe('resolveConfig', () => {
       cookieFile: 'cookies.txt',
       sessionAuth: 'session-value',
       libraryPath: 'My Library',
+      scanPaths: ['My Library', 'Existing Library'],
+      cachePath: 'shared-cache.json',
+      metadataPath: 'metadata.json',
       troveOnly: true,
       showProgress: true,
       updateOnly: true,
@@ -38,10 +53,26 @@ describe('resolveConfig', () => {
       offlineAudit: true,
     })
 
-    expect(config).toEqual({
+    expect(config).toMatchObject({
       cookieFile: 'cookies.txt',
       sessionAuth: 'session-value',
       libraryPath: 'My Library',
+      scanPaths: ['My Library', 'Existing Library'],
+      scanLibraries: [
+        {
+          path: 'My Library',
+          formatPriority: ['cbz', 'epub'],
+        },
+        {
+          path: 'Existing Library',
+          formatPriority: ['cbz', 'epub'],
+        },
+      ],
+      cachePath: 'shared-cache.json',
+      failureReportPath: undefined,
+      metadataPath: 'metadata.json',
+      hasConfiguredLibraries: false,
+      routes: [],
       troveOnly: true,
       showProgress: true,
       updateOnly: true,
@@ -66,5 +97,85 @@ describe('resolveConfig', () => {
     expect(config.extInclude).toEqual(['pdf', 'mobi'])
     expect(config.extExclude).toEqual(['zip'])
     expect(config.formatPriority).toEqual(['cbz', 'epub'])
+  })
+
+  it('keeps the library path as the first scan path and removes duplicates', () => {
+    const config = resolveConfig({
+      libraryPath: 'Library',
+      scanPaths: ['Books', 'Library', 'Manga'],
+    })
+
+    expect(config.scanPaths).toEqual(['Library', 'Books', 'Manga'])
+  })
+
+  it('uses a named library as the active destination and scans all configured libraries', () => {
+    const config = resolveConfig({
+      defaultLibrary: 'comics',
+      libraryName: 'books',
+      cachePath: 'cache.json',
+      failureReportPath: 'failures.json',
+      metadataPath: 'metadata.json',
+      routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
+      libraries: {
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz', 'pdf'],
+          extInclude: ['cbz', 'pdf'],
+        },
+        books: {
+          path: 'Books',
+          formatPriority: ['epub', 'pdf', 'mobi'],
+          extInclude: ['epub', 'pdf', 'mobi'],
+        },
+      },
+    })
+
+    expect(config).toMatchObject({
+      libraryName: 'books',
+      libraryPath: 'Books',
+      scanPaths: ['Comics', 'Books'],
+      cachePath: 'cache.json',
+      failureReportPath: 'failures.json',
+      metadataPath: 'metadata.json',
+      hasConfiguredLibraries: true,
+      routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
+      formatPriority: ['epub', 'pdf', 'mobi'],
+      extInclude: ['epub', 'pdf', 'mobi'],
+    })
+  })
+
+  it('lets CLI values override configured library values', () => {
+    const config = resolveConfig({
+      defaultLibrary: 'comics',
+      libraryName: 'comics',
+      libraries: {
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz', 'pdf'],
+          extInclude: ['cbz', 'pdf'],
+          showProgress: true,
+        },
+      },
+      formatPriority: ['pdf'],
+      extInclude: ['pdf'],
+    })
+
+    expect(config.formatPriority).toEqual(['pdf'])
+    expect(config.extInclude).toEqual(['pdf'])
+    expect(config.showProgress).toBe(true)
+  })
+
+  it('rejects routes that reference missing configured libraries', () => {
+    expect(() =>
+      resolveConfig({
+        defaultLibrary: 'comics',
+        routes: [{ extensions: ['epub'], library: 'books' }],
+        libraries: {
+          comics: {
+            path: 'Comics',
+          },
+        },
+      })
+    ).toThrow('unknown library "books"')
   })
 })
