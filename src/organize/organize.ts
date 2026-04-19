@@ -134,11 +134,11 @@ async function renamePathCasing(sourcePath: string, destinationPath: string): Pr
 }
 
 async function moveFile(sourcePath: string, destinationPath: string): Promise<void> {
-  await mkdir(path.dirname(destinationPath), { recursive: true })
   if (samePath(sourcePath, destinationPath) && !samePathExact(sourcePath, destinationPath)) {
     await renamePathCasing(sourcePath, destinationPath)
     return
   }
+  await mkdir(path.dirname(destinationPath), { recursive: true })
   try {
     await rename(sourcePath, destinationPath)
   } catch (error) {
