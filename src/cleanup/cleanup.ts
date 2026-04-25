@@ -1,18 +1,32 @@
-import { mkdir, readdir, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
-import type { AppConfig } from '../config'
-import { loadMetadata } from '../download/metadata'
-import { cleanName, hasSimilarTitle } from '../utils/fs'
+import type { AppConfig, ScanLibraryConfig } from '../config'
+import { selectRoutedDownloadCandidates } from '../download/downloader'
+import { loadMetadata, type MetadataDownload, type MetadataOrder } from '../download/metadata'
+import { buildFilenameAliases, normalizeFilenameStem } from '../utils/filename'
+import { buildProductFolder, cleanName, hasSimilarTitle } from '../utils/fs'
 
-export type CleanupActionStatus = 'would-remove' | 'removed' | 'skipped' | 'conflict'
+export type CleanupActionStatus =
+  | 'would-remove'
+  | 'removed'
+  | 'would-move'
+  | 'moved'
+  | 'review'
+  | 'skipped'
+  | 'conflict'
 
 export type CleanupAction = {
-  kind: 'empty-directory' | 'duplicate-directory'
+  kind: 'empty-directory' | 'duplicate-directory' | 'legacy-file' | 'legacy-directory'
   rootPath: string
   directoryPath: string
   status: CleanupActionStatus
   duplicateOf?: string
+  sourcePath?: string
+  destinationPath?: string
+  bundleTitle?: string
+  productTitle?: string
+  classification?: string
   fileCount?: number
   reason?: string
 }
@@ -23,6 +37,9 @@ export type CleanupSummary = {
   directoriesScanned: number
   wouldRemove: number
   removed: number
+  wouldMove: number
+  moved: number
+  review: number
   skipped: number
   conflicts: number
   reportPath?: string
@@ -36,6 +53,8 @@ export type CleanupOptions = {
   config: AppConfig
   apply?: boolean
   dedupe?: boolean
+  legacyFolders?: boolean
+  resolveConflicts?: 'prefer-canonical'
   reportPath?: string
   onProgress?: (message: string) => void
 }
@@ -63,6 +82,29 @@ type FileSnapshot = {
   size: number
 }
 
+type LegacyDownloadMatch = {
+  order: MetadataOrder
+  productTitle: string
+  download: MetadataDownload
+  library: ScanLibraryConfig
+  exact: boolean
+  alias: boolean
+  sizeMatched: boolean
+  preserveLocalName: boolean
+}
+
+type LegacyOrderMatch = {
+  order: MetadataOrder
+  matchedFiles: number
+  exactMatches: number
+  aliasMatches: number
+  sizeMatches: number
+  legacyCoverage: number
+  titleMatch: boolean
+  score: number
+  fileMatches: Map<string, LegacyDownloadMatch>
+}
+
 function uniquePaths(paths: string[]): string[] {
   const seen = new Set<string>()
   const unique: string[] = []
@@ -87,6 +129,20 @@ function cleanupRoots(config: AppConfig): string[] {
 
 function isSamePath(left: string, right: string): boolean {
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
+}
+
+function libraryForRoot(config: AppConfig, rootPath: string): ScanLibraryConfig {
+  return (
+    config.scanLibraries.find((library) => isSamePath(library.path, rootPath)) ?? {
+      name: 'library',
+      path: rootPath,
+      scanPaths: [rootPath],
+      formatPriority: config.formatPriority,
+      platformInclude: config.platformInclude,
+      extInclude: config.extInclude,
+      extExclude: config.extExclude,
+    }
+  )
 }
 
 async function collectDirectories(
@@ -166,6 +222,180 @@ function planEmptyDirectoryActions(
 
 function fileKey(file: Pick<FileSnapshot, 'name' | 'size'>): string {
   return `${file.name.toLowerCase()}|${file.size}`
+}
+
+function fileExtension(filename: string): string {
+  return filename.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function isAllCapsFolderName(name: string): boolean {
+  const letters = [...name].filter((char) => /\p{Letter}/u.test(char))
+  return letters.length > 0 && letters.every((char) => char === char.toUpperCase())
+}
+
+function aliasesOverlap(left: string[], right: string[]): boolean {
+  const leftAliases = new Set(left)
+  return right.some((alias) => leftAliases.has(alias))
+}
+
+function formatRank(filename: string, config: Pick<ScanLibraryConfig, 'formatPriority'>): number {
+  const priority = config.formatPriority ?? []
+  const index = priority.indexOf(fileExtension(filename))
+  return index === -1 ? priority.length : index
+}
+
+function canLegacyFormatSatisfyMetadata(
+  file: FileSnapshot,
+  download: MetadataDownload,
+  library: ScanLibraryConfig
+): boolean {
+  const localExtension = fileExtension(file.name)
+  const metadataExtension = fileExtension(download.filename)
+  if (localExtension === metadataExtension) {
+    return true
+  }
+
+  const priority = library.formatPriority ?? []
+  if (!priority.includes(localExtension) || !priority.includes(metadataExtension)) {
+    return false
+  }
+
+  return formatRank(file.name, library) <= formatRank(download.filename, library)
+}
+
+function productTitleMatchesFile(productTitle: string, file: FileSnapshot): boolean {
+  const productStem = normalizeFilenameStem(productTitle)
+  const fileStem = normalizeFilenameStem(file.name)
+  if (
+    productStem.length >= 8 &&
+    fileStem.length >= 8 &&
+    (productStem.includes(fileStem) || fileStem.includes(productStem))
+  ) {
+    return true
+  }
+
+  const stopWords = new Set(['a', 'an', 'and', 'book', 'the', 'vol', 'volume'])
+  const productTokens = productTitle
+    .toLowerCase()
+    .split(/[^\da-z]+/)
+    .filter((token) => token.length >= 2 && !stopWords.has(token))
+  const fileTokens = new Set(
+    file.name
+      .replace(/\.[^.]+$/, '')
+      .toLowerCase()
+      .split(/[^\da-z]+/)
+      .filter((token) => token.length >= 2 && !stopWords.has(token))
+  )
+
+  return (
+    productTokens.length >= 2 &&
+    productTokens.every((token) => fileTokens.has(token) || fileStem.includes(token))
+  )
+}
+
+function metadataDownloadMatchesFile(
+  file: FileSnapshot,
+  productTitle: string,
+  download: MetadataDownload,
+  library: ScanLibraryConfig
+):
+  | {
+      exact: boolean
+      alias: boolean
+      sizeMatched: boolean
+      preserveLocalName: boolean
+    }
+  | undefined {
+  const exact = file.name.toLowerCase() === download.filename.toLowerCase()
+  const filenameAlias = aliasesOverlap(
+    buildFilenameAliases(file.name),
+    buildFilenameAliases(download.filename)
+  )
+  const productTitleAlias = productTitleMatchesFile(productTitle, file)
+  const alias = exact || filenameAlias || productTitleAlias
+  if (!alias) {
+    return undefined
+  }
+
+  if (!canLegacyFormatSatisfyMetadata(file, download, library)) {
+    return undefined
+  }
+
+  return {
+    exact,
+    alias: !exact,
+    sizeMatched: typeof download.fileSize === 'number' && download.fileSize === file.size,
+    preserveLocalName: !exact && !filenameAlias && productTitleAlias,
+  }
+}
+
+function routedLibraryForDownload(
+  config: AppConfig,
+  rootPath: string,
+  order: MetadataOrder,
+  productTitle: string,
+  download: MetadataDownload
+): ScanLibraryConfig {
+  return (
+    selectRoutedDownloadCandidates(
+      [
+        {
+          filename: download.filename,
+          platform: download.platform,
+          url: '',
+          fileSize: download.fileSize,
+          md5: download.md5,
+        },
+      ],
+      config,
+      {
+        bundleTitle: order.bundleTitle,
+        productTitle,
+      }
+    )[0]?.library ?? libraryForRoot(config, rootPath)
+  )
+}
+
+function findBestFileMatch(
+  config: AppConfig,
+  rootPath: string,
+  order: MetadataOrder,
+  file: FileSnapshot
+): LegacyDownloadMatch | undefined {
+  const matches: LegacyDownloadMatch[] = []
+
+  for (const product of order.products) {
+    for (const download of product.downloads) {
+      const library = routedLibraryForDownload(
+        config,
+        rootPath,
+        order,
+        product.productTitle,
+        download
+      )
+      const match = metadataDownloadMatchesFile(file, product.productTitle, download, library)
+      if (!match) {
+        continue
+      }
+      matches.push({
+        order,
+        productTitle: product.productTitle,
+        download,
+        library,
+        ...match,
+      })
+    }
+  }
+
+  return matches.sort((left, right) => {
+    if (left.sizeMatched !== right.sizeMatched) {
+      return left.sizeMatched ? -1 : 1
+    }
+    if (left.exact !== right.exact) {
+      return left.exact ? -1 : 1
+    }
+    return left.download.filename.localeCompare(right.download.filename)
+  })[0]
 }
 
 function buildManifestKey(files: FileSnapshot[]): string {
@@ -373,6 +603,216 @@ async function planDuplicateDirectoryActions(
   return actions
 }
 
+function scoreLegacyOrder(
+  config: AppConfig,
+  rootPath: string,
+  order: MetadataOrder,
+  legacyFolder: TopLevelDirectorySnapshot
+): LegacyOrderMatch {
+  const fileMatches = new Map<string, LegacyDownloadMatch>()
+  let exactMatches = 0
+  let aliasMatches = 0
+  let sizeMatches = 0
+
+  for (const file of legacyFolder.files) {
+    const match = findBestFileMatch(config, rootPath, order, file)
+    if (!match) {
+      continue
+    }
+    fileMatches.set(file.path, match)
+    if (match.exact) {
+      exactMatches += 1
+    }
+    if (match.alias) {
+      aliasMatches += 1
+    }
+    if (match.sizeMatched) {
+      sizeMatches += 1
+    }
+  }
+
+  const matchedFiles = fileMatches.size
+  const legacyCoverage =
+    legacyFolder.files.length === 0 ? 0 : matchedFiles / legacyFolder.files.length
+  const titleMatch = hasSimilarTitle(legacyFolder.directoryName, order.bundleTitle)
+  const score =
+    matchedFiles * 100 +
+    sizeMatches * 25 +
+    exactMatches * 10 +
+    aliasMatches * 5 +
+    (titleMatch ? 3 : 0)
+
+  return {
+    order,
+    matchedFiles,
+    exactMatches,
+    aliasMatches,
+    sizeMatches,
+    legacyCoverage,
+    titleMatch,
+    score,
+    fileMatches,
+  }
+}
+
+function chooseLegacyOrderMatch(
+  config: AppConfig,
+  rootPath: string,
+  orders: MetadataOrder[],
+  legacyFolder: TopLevelDirectorySnapshot
+): LegacyOrderMatch | undefined | 'ambiguous' {
+  const matches = orders
+    .map((order) => scoreLegacyOrder(config, rootPath, order, legacyFolder))
+    .filter((match) => match.matchedFiles > 0)
+    .sort((left, right) => right.score - left.score)
+
+  const best = matches[0]
+  if (!best) {
+    return undefined
+  }
+
+  const minimumMatches = legacyFolder.files.length === 1 ? 1 : 2
+  if (best.matchedFiles < minimumMatches) {
+    return undefined
+  }
+
+  if (legacyFolder.files.length === 1 && !best.sizeMatches && !best.titleMatch) {
+    return undefined
+  }
+
+  const second = matches[1]
+  if (
+    second &&
+    second.matchedFiles === best.matchedFiles &&
+    second.sizeMatches === best.sizeMatches &&
+    second.exactMatches === best.exactMatches
+  ) {
+    if (best.titleMatch && !second.titleMatch) {
+      return best
+    }
+    return 'ambiguous'
+  }
+
+  return best
+}
+
+async function planLegacyFolderActions(
+  config: AppConfig,
+  roots: string[],
+  resolveConflicts?: CleanupOptions['resolveConflicts'],
+  onProgress?: (message: string) => void
+): Promise<CleanupAction[]> {
+  onProgress?.('Loading metadata for legacy folder cleanup...')
+  const metadata = await loadMetadata(config.libraryPath, config.metadataPath)
+  const orders = Object.values(metadata.orders)
+  const actions: CleanupAction[] = []
+
+  if (orders.length === 0) {
+    return actions
+  }
+
+  for (const [index, rootPath] of roots.entries()) {
+    onProgress?.(`Scanning legacy folders ${index + 1}/${roots.length}: ${rootPath}`)
+    const topLevelDirectories = await collectTopLevelDirectories(rootPath, onProgress)
+    const folders = topLevelDirectories.filter((folder) =>
+      isAllCapsFolderName(folder.directoryName)
+    )
+
+    for (const folder of folders) {
+      const match = chooseLegacyOrderMatch(config, rootPath, orders, folder)
+      if (!match || match === 'ambiguous') {
+        actions.push({
+          kind: 'legacy-directory',
+          rootPath,
+          directoryPath: folder.directoryPath,
+          status: 'review',
+          fileCount: folder.files.length,
+          classification: match === 'ambiguous' ? 'ambiguous-content-match' : 'unmatched',
+          reason:
+            match === 'ambiguous'
+              ? 'Folder contents matched multiple metadata orders equally.'
+              : 'Folder contents did not match a metadata order strongly enough.',
+        })
+        continue
+      }
+
+      for (const file of folder.files) {
+        const fileMatch = match.fileMatches.get(file.path)
+        if (!fileMatch) {
+          actions.push({
+            kind: 'legacy-file',
+            rootPath,
+            directoryPath: folder.directoryPath,
+            sourcePath: file.path,
+            status: 'review',
+            bundleTitle: match.order.bundleTitle,
+            classification: 'unmatched-file',
+            reason: 'File did not match the selected metadata order by filename or alias.',
+          })
+          continue
+        }
+
+        const destinationPath = path.join(
+          buildProductFolder(
+            fileMatch.library.path,
+            match.order.bundleTitle,
+            fileMatch.productTitle
+          ),
+          fileMatch.preserveLocalName ||
+            fileExtension(file.name) !== fileExtension(fileMatch.download.filename)
+            ? file.name
+            : fileMatch.download.filename
+        )
+        const action: CleanupAction = {
+          kind: 'legacy-file',
+          rootPath,
+          directoryPath: folder.directoryPath,
+          sourcePath: file.path,
+          destinationPath,
+          bundleTitle: match.order.bundleTitle,
+          productTitle: fileMatch.productTitle,
+          fileCount: 1,
+          status: 'would-move',
+          classification: fileMatch.exact ? 'metadata-filename' : 'metadata-alias',
+        }
+
+        if (isSamePath(file.path, destinationPath)) {
+          action.status = 'skipped'
+          action.reason = 'File is already in its canonical destination.'
+        } else {
+          try {
+            const destinationStats = await stat(destinationPath)
+            if (destinationStats.size === file.size) {
+              action.status = 'would-remove'
+              action.duplicateOf = destinationPath
+              action.classification = 'covered-by-canonical-file'
+              action.reason = 'Canonical destination already exists with the same file size.'
+            } else if (resolveConflicts === 'prefer-canonical') {
+              action.status = 'would-remove'
+              action.duplicateOf = destinationPath
+              action.classification = 'conflict-prefer-canonical'
+              action.reason =
+                'Canonical destination exists with a different file size; prefer-canonical keeps it and removes the legacy file.'
+            } else {
+              action.status = 'conflict'
+              action.reason = 'Canonical destination exists with a different file size.'
+            }
+          } catch (error) {
+            if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
+              action.status = 'conflict'
+              action.reason = error instanceof Error ? error.message : String(error)
+            }
+          }
+        }
+
+        actions.push(action)
+      }
+    }
+  }
+
+  return actions
+}
+
 async function isDirectoryEmpty(directoryPath: string): Promise<boolean> {
   const entries = await readdir(directoryPath)
   return entries.length === 0
@@ -382,6 +822,27 @@ async function applyCleanupActions(
   actions: CleanupAction[],
   onProgress?: (message: string) => void
 ): Promise<void> {
+  const moves = actions.filter((action) => action.status === 'would-move')
+  let moveIndex = 0
+
+  for (const action of moves) {
+    moveIndex += 1
+    onProgress?.(`Moving ${moveIndex}/${moves.length}: ${action.sourcePath}`)
+    if (!action.sourcePath || !action.destinationPath) {
+      action.status = 'conflict'
+      action.reason = 'Move action is missing a source or destination path.'
+      continue
+    }
+    try {
+      await mkdir(path.dirname(action.destinationPath), { recursive: true })
+      await rename(action.sourcePath, action.destinationPath)
+      action.status = 'moved'
+    } catch (error) {
+      action.status = 'conflict'
+      action.reason = error instanceof Error ? error.message : String(error)
+    }
+  }
+
   const removals = actions.filter((action) => action.status === 'would-remove')
   let index = 0
 
@@ -389,7 +850,14 @@ async function applyCleanupActions(
     index += 1
     onProgress?.(`Removing ${index}/${removals.length}: ${action.directoryPath}`)
     try {
-      if (action.kind === 'duplicate-directory') {
+      if (action.kind === 'legacy-file') {
+        if (!action.sourcePath) {
+          action.status = 'conflict'
+          action.reason = 'Remove action is missing a source path.'
+          continue
+        }
+        await rm(action.sourcePath, { force: false })
+      } else if (action.kind === 'duplicate-directory') {
         await rm(action.directoryPath, { recursive: true, force: false })
       } else if (await isDirectoryEmpty(action.directoryPath)) {
         await rmdir(action.directoryPath)
@@ -419,6 +887,9 @@ function summarizeActions(
     ...options,
     wouldRemove: actions.filter((action) => action.status === 'would-remove').length,
     removed: actions.filter((action) => action.status === 'removed').length,
+    wouldMove: actions.filter((action) => action.status === 'would-move').length,
+    moved: actions.filter((action) => action.status === 'moved').length,
+    review: actions.filter((action) => action.status === 'review').length,
     skipped: actions.filter((action) => action.status === 'skipped').length,
     conflicts: actions.filter((action) => action.status === 'conflict').length,
   }
@@ -428,6 +899,8 @@ export async function cleanupEmptyDirectories({
   config,
   apply = false,
   dedupe = false,
+  legacyFolders = false,
+  resolveConflicts,
   reportPath,
   onProgress,
 }: CleanupOptions): Promise<CleanupReport> {
@@ -446,8 +919,22 @@ export async function cleanupEmptyDirectories({
     actions.push(...(await planDuplicateDirectoryActions(config, roots, onProgress)))
   }
 
+  if (legacyFolders) {
+    actions.push(...(await planLegacyFolderActions(config, roots, resolveConflicts, onProgress)))
+  }
+
   if (apply) {
     await applyCleanupActions(actions, onProgress)
+
+    if (legacyFolders) {
+      for (const [index, rootPath] of roots.entries()) {
+        onProgress?.(`Scanning post-legacy empty folders ${index + 1}/${roots.length}: ${rootPath}`)
+        const snapshots = await collectDirectories(rootPath, onProgress)
+        const emptyActions = planEmptyDirectoryActions(rootPath, snapshots)
+        await applyCleanupActions(emptyActions, onProgress)
+        actions.push(...emptyActions)
+      }
+    }
   }
 
   const summary = summarizeActions(actions, {

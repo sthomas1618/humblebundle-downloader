@@ -253,4 +253,511 @@ describe('cleanupEmptyDirectories', () => {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
   })
+
+  it('matches legacy all-caps folders by content before title similarity', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-cleanup-'))
+
+    try {
+      const mangaPath = path.join(temporaryDirectory, 'Manga')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const fantasyBundle = 'Humble Manga Bundle: Fantasy by Kodansha Comics'
+      const fantasyProduct = 'Fairy Tail Vol. 1'
+      const filename = 'fairytail_vol1.cbz'
+      const canonicalFile = path.join(
+        buildProductFolder(mangaPath, fantasyBundle, fantasyProduct),
+        filename
+      )
+      const legacyFolder = path.join(mangaPath, 'FANTASY')
+      const legacyFile = path.join(legacyFolder, filename)
+      await mkdir(path.dirname(canonicalFile), { recursive: true })
+      await mkdir(legacyFolder, { recursive: true })
+      await writeFile(canonicalFile, 'same content')
+      await writeFile(legacyFile, 'same content')
+      await mkdir(path.dirname(metadataPath), { recursive: true })
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          orders: {
+            fantasy: {
+              orderId: 'fantasy',
+              bundleTitle: fantasyBundle,
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle: fantasyProduct,
+                  downloads: [
+                    {
+                      cacheKey: 'fantasy:fairytail_vol1.cbz',
+                      filename,
+                      extension: 'cbz',
+                      platform: 'ebook',
+                      fileSize: 'same content'.length,
+                    },
+                  ],
+                },
+              ],
+            },
+            finalFantasy: {
+              orderId: 'finalFantasy',
+              bundleTitle: 'Final Fantasy VII Remake Intergrade',
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle: 'Final Fantasy VII Remake Intergrade',
+                  downloads: [
+                    {
+                      cacheKey: 'finalFantasy:game.zip',
+                      filename: 'game.zip',
+                      extension: 'zip',
+                      platform: 'windows',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+
+      const report = await cleanupEmptyDirectories({
+        legacyFolders: true,
+        config: resolveConfig({
+          defaultLibrary: 'manga',
+          libraries: {
+            manga: {
+              path: mangaPath,
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+          metadataPath,
+        }),
+      })
+
+      expect(report).toMatchObject({
+        dryRun: true,
+        wouldRemove: 1,
+        review: 0,
+        conflicts: 0,
+      })
+      expect(report.actions).toContainEqual(
+        expect.objectContaining({
+          kind: 'legacy-file',
+          sourcePath: legacyFile,
+          duplicateOf: canonicalFile,
+          bundleTitle: fantasyBundle,
+          classification: 'covered-by-canonical-file',
+          status: 'would-remove',
+        })
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves legacy folders for review when content matches multiple orders equally', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-cleanup-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const legacyFolder = path.join(comicsPath, 'DYNAMITE MEGA')
+      await mkdir(legacyFolder, { recursive: true })
+      await writeFile(path.join(legacyFolder, 'shared.cbz'), 'content')
+      await mkdir(path.dirname(metadataPath), { recursive: true })
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          orders: {
+            original: {
+              orderId: 'original',
+              bundleTitle: 'Humble Comics Bundle: Dynamite Mega',
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle: 'Shared',
+                  downloads: [
+                    {
+                      cacheKey: 'original:shared.cbz',
+                      filename: 'shared.cbz',
+                      extension: 'cbz',
+                      platform: 'ebook',
+                    },
+                  ],
+                },
+              ],
+            },
+            encore: {
+              orderId: 'encore',
+              bundleTitle: 'Humble Comics Bundle: Dynamite Mega Encore',
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle: 'Shared',
+                  downloads: [
+                    {
+                      cacheKey: 'encore:shared.cbz',
+                      filename: 'shared.cbz',
+                      extension: 'cbz',
+                      platform: 'ebook',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+
+      const report = await cleanupEmptyDirectories({
+        legacyFolders: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+          metadataPath,
+        }),
+      })
+
+      expect(report).toMatchObject({
+        review: 1,
+        wouldMove: 0,
+        wouldRemove: 0,
+      })
+      expect(report.actions).toContainEqual(
+        expect.objectContaining({
+          kind: 'legacy-directory',
+          directoryPath: legacyFolder,
+          status: 'review',
+          classification: 'ambiguous-content-match',
+        })
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('moves legacy filename aliases into canonical product folders when applied', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-cleanup-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Become a Game Developer'
+      const productTitle = 'Unity Games'
+      const legacyFolder = path.join(booksPath, 'BECOME A GAME DEVELOPER')
+      const legacyFile = path.join(legacyFolder, 'unitygames_1557360768.epub')
+      const canonicalFile = path.join(
+        buildProductFolder(booksPath, bundleTitle, productTitle),
+        'unitygames.epub'
+      )
+      await mkdir(legacyFolder, { recursive: true })
+      await writeFile(legacyFile, 'content')
+      await mkdir(path.dirname(metadataPath), { recursive: true })
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          orders: {
+            'order-1': {
+              orderId: 'order-1',
+              bundleTitle,
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle,
+                  downloads: [
+                    {
+                      cacheKey: 'order-1:unitygames.epub',
+                      filename: 'unitygames.epub',
+                      extension: 'epub',
+                      platform: 'ebook',
+                      fileSize: 'content'.length,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+
+      const report = await cleanupEmptyDirectories({
+        apply: true,
+        legacyFolders: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          libraries: {
+            books: {
+              path: booksPath,
+              extInclude: ['epub'],
+              formatPriority: ['epub'],
+            },
+          },
+          metadataPath,
+        }),
+      })
+
+      expect(report).toMatchObject({
+        dryRun: false,
+        moved: 1,
+        conflicts: 0,
+      })
+      expect(await pathExists(legacyFile)).toBe(false)
+      expect(await readFile(canonicalFile, 'utf8')).toBe('content')
+      expect(await pathExists(legacyFolder)).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves legacy size conflicts by keeping canonical files when requested', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-cleanup-'))
+
+    try {
+      const mangaPath = path.join(temporaryDirectory, 'Manga')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Manga Bundle: Fantasy by Kodansha Comics'
+      const productTitle = 'Clockwork Planet Vol. 1'
+      const filename = 'clockworkplanet_vol1.cbz'
+      const legacyFolder = path.join(mangaPath, 'FANTASY')
+      const legacyFile = path.join(legacyFolder, filename)
+      const canonicalFile = path.join(
+        buildProductFolder(mangaPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(legacyFolder, { recursive: true })
+      await mkdir(path.dirname(canonicalFile), { recursive: true })
+      await writeFile(legacyFile, 'legacy content')
+      await writeFile(canonicalFile, 'canonical content is different')
+      await mkdir(path.dirname(metadataPath), { recursive: true })
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          orders: {
+            'order-1': {
+              orderId: 'order-1',
+              bundleTitle,
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle,
+                  downloads: [
+                    {
+                      cacheKey: `order-1:${filename}`,
+                      filename,
+                      extension: 'cbz',
+                      platform: 'ebook',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+
+      const report = await cleanupEmptyDirectories({
+        apply: true,
+        legacyFolders: true,
+        resolveConflicts: 'prefer-canonical',
+        config: resolveConfig({
+          defaultLibrary: 'manga',
+          libraries: {
+            manga: {
+              path: mangaPath,
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+          metadataPath,
+        }),
+      })
+
+      expect(report).toMatchObject({
+        removed: 2,
+        conflicts: 0,
+      })
+      expect(report.actions).toContainEqual(
+        expect.objectContaining({
+          kind: 'legacy-file',
+          sourcePath: legacyFile,
+          duplicateOf: canonicalFile,
+          status: 'removed',
+          classification: 'conflict-prefer-canonical',
+        })
+      )
+      expect(await pathExists(legacyFile)).toBe(false)
+      expect(await readFile(canonicalFile, 'utf8')).toBe('canonical content is different')
+      expect(await pathExists(legacyFolder)).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('moves preferred legacy formats when metadata only has lower-priority formats', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-cleanup-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Comics Bundle: Start Here!'
+      const productTitle = 'Ghost/Hellboy Special'
+      const legacyFolder = path.join(comicsPath, 'START HERE!')
+      const legacyFile = path.join(legacyFolder, 'ghost_hellboy_special.cbz')
+      const canonicalFile = path.join(
+        buildProductFolder(comicsPath, bundleTitle, productTitle),
+        'ghost_hellboy_special.cbz'
+      )
+      await mkdir(legacyFolder, { recursive: true })
+      await writeFile(legacyFile, 'cbz content')
+      await mkdir(path.dirname(metadataPath), { recursive: true })
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          orders: {
+            'order-1': {
+              orderId: 'order-1',
+              bundleTitle,
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle,
+                  downloads: [
+                    {
+                      cacheKey: 'order-1:ghost_hellboy_special.pdf',
+                      filename: 'ghost_hellboy_special.pdf',
+                      extension: 'pdf',
+                      platform: 'ebook',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+
+      const report = await cleanupEmptyDirectories({
+        apply: true,
+        legacyFolders: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz', 'pdf'],
+              formatPriority: ['cbz', 'pdf'],
+            },
+          },
+          metadataPath,
+        }),
+      })
+
+      expect(report).toMatchObject({
+        moved: 1,
+        conflicts: 0,
+      })
+      expect(report.actions).toContainEqual(
+        expect.objectContaining({
+          kind: 'legacy-file',
+          sourcePath: legacyFile,
+          destinationPath: canonicalFile,
+          status: 'moved',
+          classification: 'metadata-alias',
+        })
+      )
+      expect(await pathExists(legacyFile)).toBe(false)
+      expect(await readFile(canonicalFile, 'utf8')).toBe('cbz content')
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('matches legacy filenames with extra article and book words to product titles', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-cleanup-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Comics Bundle: Start Here!'
+      const productTitle = 'Maggie the Mechanic (Love & Rockets)'
+      const legacyFolder = path.join(comicsPath, 'START HERE!')
+      const legacyFile = path.join(legacyFolder, 'maggiethemechanic_aloveandrocketsbook.cbz')
+      const canonicalFile = path.join(
+        buildProductFolder(comicsPath, bundleTitle, productTitle),
+        'maggiethemechanic_aloveandrocketsbook.cbz'
+      )
+      await mkdir(legacyFolder, { recursive: true })
+      await writeFile(legacyFile, 'cbz content')
+      await mkdir(path.dirname(metadataPath), { recursive: true })
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          orders: {
+            'order-1': {
+              orderId: 'order-1',
+              bundleTitle,
+              updatedAt: new Date().toISOString(),
+              products: [
+                {
+                  productTitle,
+                  downloads: [
+                    {
+                      cacheKey: 'order-1:maggiethemechanic_loveandrockets.cbz',
+                      filename: 'maggiethemechanic_loveandrockets.cbz',
+                      extension: 'cbz',
+                      platform: 'ebook',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+
+      const report = await cleanupEmptyDirectories({
+        apply: true,
+        legacyFolders: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+          metadataPath,
+        }),
+      })
+
+      expect(report).toMatchObject({
+        moved: 1,
+        review: 0,
+        conflicts: 0,
+      })
+      expect(await pathExists(legacyFile)).toBe(false)
+      expect(await readFile(canonicalFile, 'utf8')).toBe('cbz content')
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
 })

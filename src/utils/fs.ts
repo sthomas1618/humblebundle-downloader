@@ -26,12 +26,15 @@ export function cleanName(dirtyName: string): string {
 }
 
 export function comparableTitle(title: string): string {
-  return cleanName(title)
+  return title
+    .normalize('NFKD')
     .toLowerCase()
+    .replaceAll(/['`‘’]/g, '')
+    .replaceAll('&', ' ')
+    .replaceAll(/[^\p{Letter}\p{Number}]+/gu, ' ')
     .replaceAll(/\bhumble\b/g, ' ')
     .replaceAll(/\b(?:book|tech|comic|comics|manga)\s+bundle\b/g, ' ')
     .replaceAll(/\bby\b.+$/g, ' ')
-    .replaceAll(/[^\da-z]+/g, ' ')
     .replaceAll(/\s+/g, ' ')
     .trim()
 }
