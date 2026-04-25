@@ -10,6 +10,8 @@ type CleanupOptions = {
   scanPath?: string[]
   apply?: boolean
   dedupe?: boolean
+  legacyFolders?: boolean
+  resolveConflicts?: string
   reportPath?: string
   json?: boolean
   verbose?: boolean
@@ -24,6 +26,14 @@ export function registerCleanupCommand(program: Command): void {
     .option('-l, --library-path <path>', 'Library directory when no config is used')
     .option('--scan-path <path...>', 'Additional directory roots to scan')
     .option('--dedupe', 'Also remove duplicate non-empty top-level folders when safe')
+    .option(
+      '--legacy-folders',
+      'Reconcile all-caps legacy bundle folders by matching their contents to metadata'
+    )
+    .option(
+      '--resolve-conflicts <strategy>',
+      'Resolve legacy-folder conflicts using a strategy: prefer-canonical'
+    )
     .option('--apply', 'Remove empty folders; omitted by default for a dry run')
     .option('--report-path <path>', 'Write the full cleanup report to this path')
     .option('--json', 'Print the full cleanup report as JSON')
@@ -31,12 +41,26 @@ export function registerCleanupCommand(program: Command): void {
     .action(async () => {
       const options = cleanupCommand.optsWithGlobals<CleanupOptions>()
       const { config } = await resolveCommandConfig(cleanupCommand, options)
+      const resolveConflicts = options.resolveConflicts
+      if (resolveConflicts && resolveConflicts !== 'prefer-canonical') {
+        cleanupCommand.error(
+          `Unsupported --resolve-conflicts strategy "${resolveConflicts}". Supported strategy: prefer-canonical.`,
+          { exitCode: 1 }
+        )
+      }
+      if (resolveConflicts && !options.legacyFolders) {
+        cleanupCommand.error('--resolve-conflicts can only be used with --legacy-folders.', {
+          exitCode: 1,
+        })
+      }
 
       try {
         const report = await cleanupEmptyDirectories({
           config,
           apply: options.apply,
           dedupe: options.dedupe,
+          legacyFolders: options.legacyFolders,
+          resolveConflicts,
           reportPath: options.reportPath,
           onProgress: options.json ? undefined : (message) => console.info(message),
         })
@@ -53,7 +77,10 @@ export function registerCleanupCommand(program: Command): void {
                 action.status,
                 action.kind,
                 action.directoryPath,
+                action.sourcePath ? `source: ${action.sourcePath}` : undefined,
+                action.destinationPath ? `destination: ${action.destinationPath}` : undefined,
                 action.duplicateOf ? `duplicate of: ${action.duplicateOf}` : undefined,
+                action.classification ? `classification: ${action.classification}` : undefined,
                 action.reason ? `reason: ${action.reason}` : undefined,
               ]
                 .filter(Boolean)
@@ -66,8 +93,11 @@ export function registerCleanupCommand(program: Command): void {
           options.apply ? 'Cleanup complete.' : 'Cleanup dry run complete.',
           `Roots: ${report.rootsScanned}.`,
           `Directories scanned: ${report.directoriesScanned}.`,
+          `Would move: ${report.wouldMove}.`,
+          `Moved: ${report.moved}.`,
           `Would remove: ${report.wouldRemove}.`,
           `Removed: ${report.removed}.`,
+          `Review: ${report.review}.`,
           `Skipped: ${report.skipped}.`,
           `Conflicts: ${report.conflicts}.`,
         ]

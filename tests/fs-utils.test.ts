@@ -8,6 +8,7 @@ import {
   buildProductFolder,
   buildTroveFolder,
   cleanName,
+  comparableTitle,
   ensureDirectory,
   hasSimilarTitle,
 } from '../src/utils/fs'
@@ -40,6 +41,18 @@ describe('fs utils', () => {
       )
     ).toBe(true)
     expect(hasSimilarTitle("BACK TO THE '80S BY IDW", 'Humble Book Bundle: Geek Gals')).toBe(false)
+  })
+
+  it('normalizes special characters and extra whitespace for title comparison', () => {
+    expect(comparableTitle("HIRO MASHIMA'S FAIRY TAIL & MORE BY KODANSHA")).toBe(
+      comparableTitle('Humble Manga Bundle - Hiro Mashimas Fairy Tail  More by Kodansha')
+    )
+    expect(
+      hasSimilarTitle(
+        "HIRO MASHIMA'S FAIRY TAIL & MORE BY KODANSHA",
+        'Humble Manga Bundle - Hiro Mashimas Fairy Tail  More by Kodansha'
+      )
+    ).toBe(true)
   })
 
   it('builds trove folder paths', () => {
