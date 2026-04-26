@@ -329,6 +329,50 @@ describe('auditLibrary layout detection', () => {
     }
   })
 
+  it('matches existing flat files through publisher family folders', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const flatFile = path.join(temporaryRoot, 'IDW', 'Product', 'startrek_vol1.cbz')
+      await mkdir(path.dirname(flatFile), { recursive: true })
+      await writeFile(flatFile, 'flat file')
+
+      await auditLibrary({
+        client: createSingleProductClient(
+          'Humble Comics Bundle: Star Trek 2019 by IDW Publishing',
+          ['startrek_vol1.cbz']
+        ),
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          libraries: {
+            comics: {
+              path: temporaryRoot,
+              layout: 'flat',
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(path.join(temporaryRoot, '.cache.json'), 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:startrek_vol1.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache?.flatIndex?.entries['flat:comics:product:startrek_vol1.cbz']).toMatchObject({
+        canonicalPath: flatFile,
+        publisher: 'IDW',
+      })
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('does not infer a non-Humble folder from a single filename match', async () => {
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
 

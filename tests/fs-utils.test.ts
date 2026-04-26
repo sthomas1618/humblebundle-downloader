@@ -10,7 +10,10 @@ import {
   cleanName,
   comparableTitle,
   ensureDirectory,
+  findExistingPublisherFolders,
   hasSimilarTitle,
+  inferPublisherFolder,
+  normalizePublisherFamilyKey,
 } from '../src/utils/fs'
 
 describe('fs utils', () => {
@@ -25,6 +28,46 @@ describe('fs utils', () => {
     const folder = buildProductFolder('/downloads', 'Bundle:Name', 'Product+1')
 
     expect(folder).toBe(path.join('/downloads', 'Bundle -Name', 'Product_1'))
+  })
+
+  it('infers publisher folders without hardcoded aliases', () => {
+    expect(inferPublisherFolder('Humble Comics Bundle: Star Trek 2019 by IDW Publishing')).toBe(
+      'IDW Publishing'
+    )
+    expect(inferPublisherFolder('Humble Manga Bundle: Fantasy by Kodansha Comics')).toBe(
+      'Kodansha Comics'
+    )
+    expect(inferPublisherFolder('Microids: Games & Comics Crossover Collection')).toBe('Microids')
+    expect(inferPublisherFolder('No Starch Press: Python and Security')).toBe('No Starch Press')
+    expect(inferPublisherFolder('Humble Book Bundle: Python and Security')).toBe('humble')
+  })
+
+  it('groups publisher variants by normalized family suffixes', () => {
+    expect(normalizePublisherFamilyKey('IDW Publishing')).toBe(normalizePublisherFamilyKey('IDW'))
+    expect(normalizePublisherFamilyKey('Kodansha Comics')).toBe(
+      normalizePublisherFamilyKey('Kodansha')
+    )
+    expect(normalizePublisherFamilyKey('Image Comics')).toBe(normalizePublisherFamilyKey('Image'))
+  })
+
+  it('prefers existing publisher family folders without named aliases', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-fs-test-'))
+
+    try {
+      await ensureDirectory(path.join(temporaryRoot, 'IDW', 'Series', 'book.cbz'))
+      await ensureDirectory(path.join(temporaryRoot, 'IDW Publishing', 'Series', 'book.cbz'))
+
+      await expect(findExistingPublisherFolders(temporaryRoot, 'IDW Publishing')).resolves.toEqual([
+        'IDW',
+        'IDW Publishing',
+      ])
+      await expect(findExistingPublisherFolders(temporaryRoot, 'IDW')).resolves.toEqual([
+        'IDW',
+        'IDW Publishing',
+      ])
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
   })
 
   it('matches shortened legacy bundle titles to Humble titles', () => {

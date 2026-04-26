@@ -1122,6 +1122,79 @@ describe('downloadQueue', () => {
     }
   })
 
+  it('reuses existing publisher family folders for flat downloads', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Humble Comics Bundle: Star Trek 2019 by IDW Publishing',
+        },
+        subproducts: [
+          {
+            human_name: 'Star Trek Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/files/startrek_vol1.cbz',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+    globalThis.fetch = async () => new Response('cbz content')
+
+    try {
+      await mkdir(path.join(comicsPath, 'IDW'), { recursive: true })
+
+      await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(
+        await readFile(path.join(comicsPath, 'IDW', 'Star Trek', 'startrek_vol1.cbz'), 'utf8')
+      ).toBe('cbz content')
+      await expect(
+        access(path.join(comicsPath, 'IDW Publishing', 'Star Trek', 'startrek_vol1.cbz'))
+      ).rejects.toThrow()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('backfills flat cache keys when an order-specific cache hit satisfies flat duplicates', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
     const comicsPath = path.join(temporaryDirectory, 'Comics')

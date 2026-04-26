@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir } from 'node:fs/promises'
 import path from 'node:path'
 
 /**
@@ -81,15 +81,90 @@ export function buildProductFolder(
   return path.join(libraryPath, cleanName(bundleTitle), cleanName(productTitle))
 }
 
+function inferColonPublisher(title: string): string | undefined {
+  if (/^humble\b/i.test(title)) {
+    return undefined
+  }
+  return title.match(/^([^:]+):\s+.+$/i)?.[1]
+}
+
 export function inferPublisherFolder(bundleTitle: string): string {
   const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
-  const publisher =
+  const inferredPublisher =
     title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
     title.match(/\bby\s+(.+?)\s*$/i)?.[1] ??
     title.match(/\bfrom\s+(.+?)\s*$/i)?.[1] ??
+    inferColonPublisher(title) ??
     'humble'
 
-  return cleanName(publisher) || 'humble'
+  return cleanName(inferredPublisher) || 'humble'
+}
+
+const PUBLISHER_SUFFIX_WORDS = new Set([
+  'book',
+  'books',
+  'comic',
+  'comics',
+  'company',
+  'entertainment',
+  'game',
+  'games',
+  'group',
+  'inc',
+  'lab',
+  'labs',
+  'limited',
+  'llc',
+  'ltd',
+  'media',
+  'press',
+  'production',
+  'productions',
+  'publisher',
+  'publishers',
+  'publishing',
+  'studio',
+  'studios',
+])
+
+export function normalizePublisherFamilyKey(publisherFolder: string): string {
+  const tokens = normalizeFlatPublisherKey(publisherFolder).split(' ').filter(Boolean)
+  while (tokens.length > 1 && PUBLISHER_SUFFIX_WORDS.has(tokens.at(-1) ?? '')) {
+    tokens.pop()
+  }
+  return tokens.join(' ')
+}
+
+export async function findExistingPublisherFolders(
+  libraryPath: string,
+  publisherFolder: string
+): Promise<string[]> {
+  const familyKey = normalizePublisherFamilyKey(publisherFolder)
+
+  try {
+    const entries = await readdir(libraryPath, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((entryName) => normalizePublisherFamilyKey(entryName) === familyKey)
+      .sort((left, right) => {
+        const lengthDifference = left.length - right.length
+        if (lengthDifference !== 0) {
+          return lengthDifference
+        }
+        return left.localeCompare(right)
+      })
+  } catch {
+    return []
+  }
+}
+
+export async function resolvePublisherFolder(
+  libraryPath: string,
+  publisherFolder: string
+): Promise<string> {
+  const existingPublisherFolders = await findExistingPublisherFolders(libraryPath, publisherFolder)
+  return existingPublisherFolders[0] ?? publisherFolder
 }
 
 export function inferSeriesFolder(productTitle: string): string {
