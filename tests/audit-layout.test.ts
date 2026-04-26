@@ -242,6 +242,93 @@ describe('auditLibrary layout detection', () => {
     }
   })
 
+  it('matches existing flat library files and writes synthetic flat cache entries', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const flatFile = path.join(temporaryRoot, 'Image Comics', 'Saga', 'saga_vol1.cbz')
+      await mkdir(path.dirname(flatFile), { recursive: true })
+      await writeFile(flatFile, 'flat file')
+
+      await auditLibrary({
+        client: {
+          ...createSingleProductClient('Humble Comics Bundle: Saga by Image Comics', [
+            'saga_vol1.cbz',
+          ]),
+          getOrderDetails: async () => ({
+            product: {
+              human_name: 'Humble Comics Bundle: Saga by Image Comics',
+            },
+            subproducts: [
+              {
+                human_name: 'Saga Vol. 1',
+                downloads: [
+                  {
+                    platform: 'ebook',
+                    download_struct: [
+                      {
+                        url: {
+                          web: 'https://example.com/files/saga_vol1.cbz',
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+        },
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          libraries: {
+            comics: {
+              path: temporaryRoot,
+              layout: 'flat',
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(path.join(temporaryRoot, '.cache.json'), 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(cache?.['order-1:saga_vol1.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache?.['flat:comics:saga_vol_1:saga_vol1.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache?.flatIndex?.entries['flat:comics:saga_vol_1:saga_vol1.cbz']).toMatchObject({
+        canonicalPath: flatFile,
+        publisher: 'Image Comics',
+        series: 'Saga',
+        productTitle: 'Saga Vol. 1',
+        filename: 'saga_vol1.cbz',
+        bundleLocations: [
+          {
+            cacheKey: 'order-1:saga_vol1.cbz',
+            orderId: 'order-1',
+            bundleTitle: 'Humble Comics Bundle: Saga by Image Comics',
+            productTitle: 'Saga Vol. 1',
+            bundlePath: path.join(
+              temporaryRoot,
+              'Humble Comics Bundle - Saga by Image Comics',
+              'Saga Vol. 1',
+              'saga_vol1.cbz'
+            ),
+          },
+        ],
+      })
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('does not infer a non-Humble folder from a single filename match', async () => {
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
 

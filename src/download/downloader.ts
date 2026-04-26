@@ -6,8 +6,24 @@ import path from 'node:path'
 import type { ApiClient } from '../api/client'
 import type { AppConfig, ScanLibraryConfig } from '../config'
 import { buildFilenameAliases } from '../utils/filename'
-import { buildProductFolder, buildTroveFolder, cleanName, hasSimilarTitle } from '../utils/fs'
-import { loadCache, saveCache, type CacheEntry } from './cache'
+import {
+  buildLibraryProductFolder,
+  buildProductFolder,
+  buildTroveFolder,
+  cleanName,
+  inferPublisherFolder,
+  inferSeriesFolder,
+  normalizeFlatProductKey,
+  hasSimilarTitle,
+} from '../utils/fs'
+import {
+  loadCache,
+  saveCache,
+  upsertFlatIndexEntry,
+  type CacheData,
+  type CacheEntry,
+  type FlatIndexEntry,
+} from './cache'
 import {
   loadMetadata,
   resolveMetadataPath,
@@ -35,6 +51,12 @@ export type DownloadItem = {
   expectedSize?: number
   expectedMd5?: string
   cacheKey?: string
+  additionalCacheKeys?: string[]
+  flatIndexEntries?: Array<
+    Omit<FlatIndexEntry, 'bundleLocations'> & {
+      bundleLocation: FlatIndexEntry['bundleLocations'][number]
+    }
+  >
   cacheEntry?: CacheEntry
   cacheUpdate?: CacheEntry
 }
@@ -75,6 +97,7 @@ export type AuditSummary = {
 
 export type DownloadInspectionItem = {
   cacheKey: string
+  flatCacheKey?: string
   filename: string
   platform: string
   url: string
@@ -296,6 +319,86 @@ export function shouldDownloadExtension(
 
 function getExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function flatCacheLibraryKey(library: ScanLibraryConfig): string {
+  return encodeURIComponent(library.name ?? library.path)
+}
+
+export function buildFlatCacheKey(
+  library: ScanLibraryConfig,
+  productTitle: string,
+  filename: string
+): string | undefined {
+  if (library.layout !== 'flat') {
+    return undefined
+  }
+  const productKey = normalizeFlatProductKey(productTitle).replaceAll(' ', '_')
+  if (!productKey) {
+    return undefined
+  }
+  return `flat:${flatCacheLibraryKey(library)}:${productKey}:${filename.toLowerCase()}`
+}
+
+function cacheDataEntryCount(cache: CacheData): number {
+  return Object.keys(cache).filter((key) => key !== 'transforms' && key !== 'flatIndex').length
+}
+
+function getOrderIdFromCacheKey(cacheKey: string): string | undefined {
+  const separatorIndex = cacheKey.indexOf(':')
+  return separatorIndex === -1 ? undefined : cacheKey.slice(0, separatorIndex)
+}
+
+function getFlatPathParts(
+  libraryPath: string,
+  canonicalPath: string
+): { publisher?: string; series?: string } {
+  const relativePath = path.relative(libraryPath, canonicalPath)
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return {}
+  }
+  const [publisher, series] = relativePath.split(path.sep)
+  return { publisher, series }
+}
+
+function buildFlatIndexUpdate({
+  flatCacheKey,
+  library,
+  bundleTitle,
+  productTitle,
+  filename,
+  cacheKey,
+  canonicalPath,
+}: {
+  flatCacheKey: string
+  library: ScanLibraryConfig
+  bundleTitle: string
+  productTitle: string
+  filename: string
+  cacheKey: string
+  canonicalPath: string
+}): Omit<FlatIndexEntry, 'bundleLocations'> & {
+  bundleLocation: FlatIndexEntry['bundleLocations'][number]
+} {
+  const flatPathParts = getFlatPathParts(library.path, canonicalPath)
+  return {
+    flatCacheKey,
+    canonicalPath,
+    libraryName: library.name,
+    libraryPath: library.path,
+    publisher: flatPathParts.publisher ?? inferPublisherFolder(bundleTitle),
+    series: flatPathParts.series ?? inferSeriesFolder(productTitle),
+    productKey: normalizeFlatProductKey(productTitle),
+    productTitle,
+    filename,
+    bundleLocation: {
+      cacheKey,
+      orderId: getOrderIdFromCacheKey(cacheKey),
+      bundleTitle,
+      productTitle,
+      bundlePath: path.join(buildProductFolder(library.path, bundleTitle, productTitle), filename),
+    },
+  }
 }
 
 export function selectPreferredDownloadCandidates<T extends { filename: string }>(
@@ -892,6 +995,7 @@ export async function downloadLibrary({
   }
 
   const items: DownloadItem[] = []
+  const plannedFlatDownloadItems = new Map<string, DownloadItem>()
   let locallySatisfied = 0
   let metadataUpdatesSinceSave = 0
 
@@ -1038,8 +1142,56 @@ export async function downloadLibrary({
         })
         for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
-          const cacheEntry = cache[cacheKey]
+          const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
+          const cacheEntry = cache[cacheKey] ?? (flatCacheKey ? cache[flatCacheKey] : undefined)
+          const expectedDestination = path.join(
+            buildLibraryProductFolder(library, bundleTitle, product.human_name),
+            candidate.filename
+          )
+          const plannedFlatDownloadItem = flatCacheKey
+            ? plannedFlatDownloadItems.get(flatCacheKey)
+            : undefined
+          if (flatCacheKey && plannedFlatDownloadItem && !config.updateOnly) {
+            plannedFlatDownloadItem.additionalCacheKeys = [
+              ...(plannedFlatDownloadItem.additionalCacheKeys ?? []),
+              cacheKey,
+            ]
+            plannedFlatDownloadItem.flatIndexEntries = [
+              ...(plannedFlatDownloadItem.flatIndexEntries ?? []),
+              buildFlatIndexUpdate({
+                flatCacheKey,
+                library,
+                bundleTitle,
+                productTitle: product.human_name,
+                filename: candidate.filename,
+                cacheKey,
+                canonicalPath: plannedFlatDownloadItem.destination,
+              }),
+            ]
+            continue
+          }
           if (cacheEntry && !config.updateOnly) {
+            if (!cache[cacheKey]) {
+              cache[cacheKey] = cacheEntry
+            }
+            if (flatCacheKey) {
+              if (!cache[flatCacheKey]) {
+                cache[flatCacheKey] = cacheEntry
+              }
+              upsertFlatIndexEntry(
+                cache,
+                buildFlatIndexUpdate({
+                  flatCacheKey,
+                  library,
+                  bundleTitle,
+                  productTitle: product.human_name,
+                  filename: candidate.filename,
+                  cacheKey,
+                  canonicalPath:
+                    cache.flatIndex?.entries[flatCacheKey]?.canonicalPath ?? expectedDestination,
+                })
+              )
+            }
             continue
           }
           const localPath = await findAuditFile(
@@ -1061,15 +1213,26 @@ export async function downloadLibrary({
             cache[cacheKey] = {
               urlLastModified: new Date().toUTCString(),
             }
+            if (flatCacheKey) {
+              cache[flatCacheKey] = cache[cacheKey]
+              upsertFlatIndexEntry(
+                cache,
+                buildFlatIndexUpdate({
+                  flatCacheKey,
+                  library,
+                  bundleTitle,
+                  productTitle: product.human_name,
+                  filename: candidate.filename,
+                  cacheKey,
+                  canonicalPath: localPath,
+                })
+              )
+            }
             continue
           }
-
-          items.push({
+          const item: DownloadItem = {
             url: candidate.url,
-            destination: path.join(
-              buildProductFolder(library.path, bundleTitle, product.human_name),
-              candidate.filename
-            ),
+            destination: expectedDestination,
             label: candidate.filename,
             orderId,
             bundleTitle,
@@ -1077,8 +1240,26 @@ export async function downloadLibrary({
             expectedSize: candidate.fileSize,
             expectedMd5: candidate.md5,
             cacheKey,
+            additionalCacheKeys: flatCacheKey ? [flatCacheKey] : undefined,
+            flatIndexEntries: flatCacheKey
+              ? [
+                  buildFlatIndexUpdate({
+                    flatCacheKey,
+                    library,
+                    bundleTitle,
+                    productTitle: product.human_name,
+                    filename: candidate.filename,
+                    cacheKey,
+                    canonicalPath: expectedDestination,
+                  }),
+                ]
+              : undefined,
             cacheEntry,
-          })
+          }
+          items.push(item)
+          if (flatCacheKey) {
+            plannedFlatDownloadItems.set(flatCacheKey, item)
+          }
         }
       }
     }
@@ -1111,6 +1292,12 @@ export async function downloadLibrary({
       cache[cacheKey] = {
         ...cacheUpdate,
         urlLastModified: cacheUpdate.urlLastModified ?? lastModified,
+      }
+      for (const additionalCacheKey of result.item.additionalCacheKeys ?? []) {
+        cache[additionalCacheKey] = cache[cacheKey]
+      }
+      for (const flatIndexEntry of result.item.flatIndexEntries ?? []) {
+        upsertFlatIndexEntry(cache, flatIndexEntry)
       }
       cacheUpdatesSinceSave += 1
     }
@@ -1155,7 +1342,7 @@ export async function downloadLibrary({
     skipped: results.filter((result) => result.skipped).length,
     locallySatisfied,
     failed: results.filter((result) => result.error).length,
-    cacheEntries: Object.keys(cache).filter((key) => key !== 'transforms').length,
+    cacheEntries: cacheDataEntryCount(cache),
     failureReportPath,
     metadataOrders: metadata ? Object.keys(metadata.orders).length : 0,
     metadataPath,
@@ -1168,7 +1355,7 @@ export async function inspectDownloadState({
   cache,
   onProgress,
 }: DownloadContext & {
-  cache: Record<string, CacheEntry>
+  cache: CacheData
 }): Promise<DownloadInspection> {
   const scanPaths = getScanPaths(config)
   emitProgress(onProgress, 'Indexing local files...')
@@ -1231,8 +1418,9 @@ export async function inspectDownloadState({
       })
       for (const { candidate, library, routing } of selectedCandidates) {
         const cacheKey = `${orderId}:${candidate.filename}`
+        const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
         const expectedDestination = path.join(
-          buildProductFolder(library.path, bundleTitle, product.human_name),
+          buildLibraryProductFolder(library, bundleTitle, product.human_name),
           candidate.filename
         )
         const localPath = await findAuditFile(
@@ -1252,6 +1440,7 @@ export async function inspectDownloadState({
 
         inspection.candidates.push({
           cacheKey,
+          flatCacheKey,
           filename: candidate.filename,
           platform: candidate.platform,
           url: candidate.url,
@@ -1264,7 +1453,7 @@ export async function inspectDownloadState({
           expectedSize: candidate.fileSize,
           expectedMd5: candidate.md5,
           localPath,
-          cacheEntry: cache[cacheKey],
+          cacheEntry: cache[cacheKey] ?? (flatCacheKey ? cache[flatCacheKey] : undefined),
           routing,
         })
       }
@@ -1298,7 +1487,7 @@ async function fetchLastModified(client: ApiClient, url: string): Promise<string
 }
 
 async function auditCacheEntry(
-  cache: Record<string, CacheEntry>,
+  cache: CacheData,
   cacheKey: string,
   localPath: string,
   metadata: CacheEntry
@@ -1397,8 +1586,14 @@ export async function buildAuditCandidatePaths(
     const productFolder =
       (await findExistingDirectory(bundleFolder, productTitle)) ??
       buildProductFolder(libraryPath, bundleTitle, productTitle)
+    const flatProductFolder = path.join(
+      libraryPath,
+      inferPublisherFolder(bundleTitle),
+      inferSeriesFolder(productTitle)
+    )
 
     paths.push(
+      path.join(flatProductFolder, ...segments),
       path.join(productFolder, ...segments),
       path.join(defaultProductFolder, ...segments),
       path.join(bundleFolder, ...segments),
@@ -1692,7 +1887,7 @@ export async function auditLibrary({
 }: DownloadContext): Promise<AuditSummary> {
   emitProgress(onProgress, 'Loading existing cache...')
   const existingCache = await loadCache(config.libraryPath, config.cachePath)
-  const cache: Record<string, CacheEntry> = {}
+  const cache: CacheData = {}
   if (existingCache.transforms) {
     Object.assign(cache, { transforms: existingCache.transforms })
   }
@@ -1908,6 +2103,7 @@ export async function auditLibrary({
         summary.selectedCandidates += selectedCandidates.length
         for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
+          const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
           const localPath = await findAuditFile(
             await buildAuditCandidatePaths(
               scanPaths,
@@ -1933,13 +2129,28 @@ export async function auditLibrary({
           cache[cacheKey] = {
             urlLastModified: lastModified ?? now,
           }
+          if (flatCacheKey) {
+            cache[flatCacheKey] = cache[cacheKey]
+            upsertFlatIndexEntry(
+              cache,
+              buildFlatIndexUpdate({
+                flatCacheKey,
+                library,
+                bundleTitle,
+                productTitle: product.human_name,
+                filename: candidate.filename,
+                cacheKey,
+                canonicalPath: localPath,
+              })
+            )
+          }
         }
       }
     }
   }
 
   await saveCache(config.libraryPath, cache, config.cachePath)
-  summary.cacheEntries = Object.keys(cache).filter((key) => key !== 'transforms').length
+  summary.cacheEntries = cacheDataEntryCount(cache)
   emitProgress(onProgress, `Wrote ${summary.cacheEntries} cache entries.`)
   if (metadata) {
     await saveMetadata(config.libraryPath, metadata, config.metadataPath)

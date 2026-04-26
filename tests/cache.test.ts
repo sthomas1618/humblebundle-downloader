@@ -13,6 +13,36 @@ describe('cache helpers', () => {
         urlLastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
         md5: 'abc123',
       },
+      flatIndex: {
+        version: 1,
+        entries: {
+          'flat:books:book:file.txt': {
+            flatCacheKey: 'flat:books:book:file.txt',
+            canonicalPath: path.join(temporaryDirectory, 'Publisher', 'Book', 'file.txt'),
+            libraryName: 'books',
+            libraryPath: temporaryDirectory,
+            publisher: 'Publisher',
+            series: 'Book',
+            productKey: 'book',
+            productTitle: 'Book',
+            filename: 'file.txt',
+            bundleLocations: [
+              {
+                cacheKey: 'order:file.txt',
+                orderId: 'order',
+                bundleTitle: 'Bundle by Publisher',
+                productTitle: 'Book',
+                bundlePath: path.join(
+                  temporaryDirectory,
+                  'Bundle by Publisher',
+                  'Book',
+                  'file.txt'
+                ),
+              },
+            ],
+          },
+        },
+      },
     }
 
     try {

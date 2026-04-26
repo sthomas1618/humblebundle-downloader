@@ -106,7 +106,7 @@ function addCheck(
 
 function cacheEntries(cache: CacheData): Array<[string, CacheEntry]> {
   return Object.entries(cache).filter(
-    (entry): entry is [string, CacheEntry] => entry[0] !== 'transforms'
+    (entry): entry is [string, CacheEntry] => entry[0] !== 'transforms' && entry[0] !== 'flatIndex'
   )
 }
 
@@ -117,7 +117,7 @@ function countTransformEntries(cache: CacheData): number {
 function validateCacheEntries(cache: CacheData): string[] {
   const invalidEntries: string[] = []
   for (const [key, value] of Object.entries(cache)) {
-    if (key === 'transforms') {
+    if (key === 'transforms' || key === 'flatIndex') {
       continue
     }
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -416,7 +416,11 @@ async function validateDeepCache(options: {
     cache: options.cache,
     onProgress: options.onProgress ? (message) => options.onProgress?.(message) : undefined,
   })
-  const manifestKeys = new Set(inspection.candidates.map((candidate) => candidate.cacheKey))
+  const manifestKeys = new Set(
+    inspection.candidates.flatMap((candidate) =>
+      candidate.flatCacheKey ? [candidate.cacheKey, candidate.flatCacheKey] : [candidate.cacheKey]
+    )
+  )
   const validation: DoctorDeepCacheValidation = {
     selectedCandidates: inspection.candidates.length,
     routing: createRoutingSummary(),

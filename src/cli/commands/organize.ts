@@ -21,6 +21,7 @@ type OrganizeOptions = {
   keys?: string[]
   apply?: boolean
   canonical?: boolean
+  flat?: boolean
   reportPath?: string
   json?: boolean
   verbose?: boolean
@@ -38,6 +39,10 @@ export function registerOrganizeCommand(program: Command): void {
   organizeCommand
     .option('--apply', 'Move files; omitted by default for a dry run')
     .option('--canonical', 'Also move files already in the right library into canonical folders')
+    .option(
+      '--flat',
+      'Organize products into publisher/series folders and mark applied libraries flat'
+    )
     .option('--report-path <path>', 'Write the full organize report to this path')
     .option('--json', 'Print the full organize report as JSON')
     .option('--verbose', 'Print each planned move, missing file, and conflict')
@@ -50,6 +55,7 @@ export function registerOrganizeCommand(program: Command): void {
           config,
           apply: options.apply,
           canonical: options.canonical,
+          flat: options.flat,
           reportPath: options.reportPath,
           onProgress: options.json ? undefined : (message) => console.info(message),
         })
