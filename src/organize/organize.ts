@@ -398,6 +398,32 @@ async function findLegacyBundleDuplicateSource(
   return undefined
 }
 
+async function findFlatPublisherAliasDuplicateSource(
+  candidatePaths: string[],
+  destinationPath: string,
+  config: AppConfig
+): Promise<string | undefined> {
+  if (!(await pathExists(destinationPath))) {
+    return undefined
+  }
+  const normalizedDestination = path.resolve(destinationPath).toLowerCase()
+  for (const candidatePath of candidatePaths) {
+    if (path.resolve(candidatePath).toLowerCase() === normalizedDestination) {
+      continue
+    }
+    if (
+      !isFlatPublisherFamilyAliasSource(config, candidatePath, destinationPath) ||
+      !(await pathExists(candidatePath))
+    ) {
+      continue
+    }
+    if (await sameFileSize(candidatePath, destinationPath)) {
+      return candidatePath
+    }
+  }
+  return undefined
+}
+
 async function pruneEmptyParents(startPath: string, stopPath: string): Promise<void> {
   let currentPath = path.dirname(startPath)
   const stop = path.resolve(stopPath).toLowerCase()
@@ -718,27 +744,35 @@ async function planOrganizeAction({
           allBundleTitles
         )
       : undefined
-  if (legacyDuplicateSource) {
-    action.sourcePath = legacyDuplicateSource
-    if (!(await sameFileSize(legacyDuplicateSource, destinationPath))) {
+  const publisherAliasDuplicateSource =
+    flat && !legacyDuplicateSource && (await pathExists(destinationPath))
+      ? await findFlatPublisherAliasDuplicateSource(auditCandidatePaths, destinationPath, config)
+      : undefined
+  const duplicateSource = legacyDuplicateSource ?? publisherAliasDuplicateSource
+  if (duplicateSource) {
+    action.sourcePath = duplicateSource
+    if (!(await sameFileSize(duplicateSource, destinationPath))) {
       action.reason = 'Flat destination exists but differs in file size.'
       await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
       return action
     }
     action.status = 'would-remove-duplicate'
-    action.reason = 'Flat destination already satisfies this legacy bundle duplicate.'
+    action.reason = 'Flat destination already satisfies this duplicate source.'
     plannedDestinations.add(normalizedDestination)
     return action
   }
   if (flat && normalizedSource !== normalizedDestination && (await pathExists(destinationPath))) {
-    if (isLegacyBundleSource(library.path, sourcePath, bundleTitle, allBundleTitles)) {
+    if (
+      isLegacyBundleSource(library.path, sourcePath, bundleTitle, allBundleTitles) ||
+      isFlatPublisherFamilyAliasSource(config, sourcePath, destinationPath)
+    ) {
       if (!(await sameFileSize(sourcePath, destinationPath))) {
         action.reason = 'Flat destination exists but differs in file size.'
         await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
         return action
       }
       action.status = 'would-remove-duplicate'
-      action.reason = 'Flat destination already satisfies this legacy bundle duplicate.'
+      action.reason = 'Flat destination already satisfies this duplicate source.'
     } else {
       action.status = 'already-correct'
       action.reason = 'Flat destination already satisfies this file.'
@@ -992,8 +1026,70 @@ function getFlatPathParts(
   }
 }
 
+function getConfiguredFlatPublisherForPath(
+  config: AppConfig,
+  filePath: string
+): { library: ScanLibraryConfig; publisherFolder: string } | undefined {
+  for (const library of config.scanLibraries) {
+    const publisherFolder = topLevelDirectoryName(library.path, filePath)
+    if (!publisherFolder || publisherFolder.toLowerCase() === 'humble') {
+      continue
+    }
+    if (isHumbleBundleFolder(publisherFolder)) {
+      continue
+    }
+    return { library, publisherFolder }
+  }
+  return undefined
+}
+
+function isFlatPublisherFamilyAliasSource(
+  config: AppConfig,
+  sourcePath: string,
+  destinationPath: string
+): boolean {
+  const source = getConfiguredFlatPublisherForPath(config, sourcePath)
+  const destination = getConfiguredFlatPublisherForPath(config, destinationPath)
+  if (!source || !destination) {
+    return false
+  }
+  if (
+    samePath(source.library.path, destination.library.path) &&
+    source.publisherFolder.toLowerCase() === destination.publisherFolder.toLowerCase()
+  ) {
+    return false
+  }
+  return (
+    normalizePublisherFamilyKey(source.publisherFolder) ===
+    normalizePublisherFamilyKey(destination.publisherFolder)
+  )
+}
+
 type MetadataOrder = Awaited<ReturnType<typeof loadMetadata>>['orders'][string]
 type MetadataProduct = MetadataOrder['products'][number]
+
+function filenameStem(filename: string): string {
+  return path.basename(filename, path.extname(filename)).toLowerCase()
+}
+
+function findMetadataProductTitleForFilename(
+  filename: string,
+  orders: MetadataOrder[]
+): string | undefined {
+  const sourceStem = filenameStem(filename)
+  if (!sourceStem) {
+    return undefined
+  }
+  const matches = new Set<string>()
+  for (const order of orders) {
+    for (const product of order.products) {
+      if (product.downloads.some((download) => filenameStem(download.filename) === sourceStem)) {
+        matches.add(product.productTitle)
+      }
+    }
+  }
+  return matches.size === 1 ? [...matches][0] : undefined
+}
 
 function metadataFolderKey(title: string): string {
   return cleanName(title).toLowerCase()
@@ -1232,7 +1328,137 @@ async function planFlatLeftovers({
     }
   }
 
+  await planFlatPublisherAliasFolders({
+    orders,
+    config,
+    actions,
+    plannedMovesBySource,
+    plannedDestinations,
+    resolveConflicts,
+    conflictDir,
+  })
   await planFlatEmptyLegacyFolders({ orders, config, actions, allBundleTitles })
+}
+
+async function planFlatPublisherAliasFolders({
+  orders,
+  config,
+  actions,
+  plannedMovesBySource,
+  plannedDestinations,
+  resolveConflicts,
+  conflictDir,
+}: {
+  orders: MetadataOrder[]
+  config: AppConfig
+  actions: OrganizeAction[]
+  plannedMovesBySource: Map<string, string>
+  plannedDestinations: Set<string>
+  resolveConflicts: ConflictResolutionMode
+  conflictDir?: string
+}): Promise<void> {
+  const plannedSources = new Set(
+    actions
+      .map((action) => action.sourcePath)
+      .filter((sourcePath): sourcePath is string => sourcePath !== undefined)
+      .map((sourcePath) => path.resolve(sourcePath).toLowerCase())
+  )
+
+  for (const library of config.scanLibraries) {
+    let topLevelEntries
+    try {
+      topLevelEntries = await readdir(library.path, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    const publisherFoldersByFamily = new Map<string, string[]>()
+    for (const entry of topLevelEntries.filter((topLevelEntry) => topLevelEntry.isDirectory())) {
+      if (entry.name.toLowerCase() === 'humble' || isHumbleBundleFolder(entry.name)) {
+        continue
+      }
+      const familyKey = normalizePublisherFamilyKey(entry.name)
+      if (!familyKey || familyKey === 'humble') {
+        continue
+      }
+      const folders = publisherFoldersByFamily.get(familyKey) ?? []
+      folders.push(entry.name)
+      publisherFoldersByFamily.set(familyKey, folders)
+    }
+
+    for (const folders of publisherFoldersByFamily.values()) {
+      if (folders.length < 2) {
+        continue
+      }
+      const [canonicalFolder, ...aliasFolders] = folders.sort((left, right) => {
+        const lengthDifference = left.length - right.length
+        if (lengthDifference !== 0) {
+          return lengthDifference
+        }
+        return left.localeCompare(right)
+      })
+      if (!canonicalFolder) {
+        continue
+      }
+      const canonicalPath = path.join(library.path, canonicalFolder)
+      for (const aliasFolder of aliasFolders) {
+        const aliasPath = path.join(library.path, aliasFolder)
+        for (const sourcePath of await collectFiles(aliasPath)) {
+          const normalizedSource = path.resolve(sourcePath).toLowerCase()
+          if (plannedSources.has(normalizedSource)) {
+            continue
+          }
+          const relativeSource = path.relative(aliasPath, sourcePath)
+          const relativeDirectory = path.dirname(relativeSource)
+          const matchedProductTitle =
+            relativeDirectory === '.'
+              ? findMetadataProductTitleForFilename(path.basename(sourcePath), orders)
+              : undefined
+          const destinationPath = matchedProductTitle
+            ? path.join(
+                canonicalPath,
+                inferSeriesFolder(matchedProductTitle),
+                path.basename(sourcePath)
+              )
+            : path.join(canonicalPath, relativeSource)
+          const normalizedDestination = path.resolve(destinationPath).toLowerCase()
+          if (normalizedSource === normalizedDestination) {
+            continue
+          }
+          const action: OrganizeAction = {
+            cacheKey: `publisher-alias:${normalizedSource}`,
+            filename: path.basename(sourcePath),
+            bundleTitle: aliasFolder,
+            productTitle: path.dirname(relativeSource) === '.' ? 'Publisher alias' : relativeSource,
+            expectedLibraryName: library.name,
+            expectedLibraryPath: library.path,
+            selected: false,
+            sourcePath,
+            destinationPath,
+            status: 'would-move-supplement',
+            reason: `Publisher alias folder will be merged into ${canonicalFolder}.`,
+          }
+          if (await pathExists(destinationPath)) {
+            if (await sameFileSize(sourcePath, destinationPath)) {
+              action.status = 'would-remove-duplicate'
+              action.reason = 'Canonical publisher folder already has this same-size file.'
+            } else {
+              action.reason = 'Canonical publisher folder already has a different file.'
+              await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
+            }
+          } else if (plannedDestinations.has(normalizedDestination)) {
+            action.status = 'conflict'
+            action.reason = 'Destination file is already planned for another candidate.'
+          } else {
+            plannedDestinations.add(normalizedDestination)
+          }
+          plannedSources.add(normalizedSource)
+          plannedMovesBySource.set(normalizedSource, normalizedDestination)
+          actions.push(action)
+        }
+      }
+    }
+  }
 }
 
 async function planFlatEmptyLegacyFolders({
@@ -1316,6 +1542,9 @@ async function recordFlatOrganizeCache({
   const now = new Date().toUTCString()
 
   for (const action of actions) {
+    if (action.cacheKey.startsWith('publisher-alias:')) {
+      continue
+    }
     if (
       action.status !== 'moved' &&
       action.status !== 'moved-supplement' &&

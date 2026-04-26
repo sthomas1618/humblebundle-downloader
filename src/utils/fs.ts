@@ -125,11 +125,18 @@ const PUBLISHER_SUFFIX_WORDS = new Set([
   'publishing',
   'studio',
   'studios',
+  'megabundle',
+  'anniversary',
+  'collection',
+  'bundle',
 ])
 
 export function normalizePublisherFamilyKey(publisherFolder: string): string {
   const tokens = normalizeFlatPublisherKey(publisherFolder).split(' ').filter(Boolean)
   while (tokens.length > 1 && PUBLISHER_SUFFIX_WORDS.has(tokens.at(-1) ?? '')) {
+    tokens.pop()
+  }
+  while (tokens.length > 1 && /^\d+(?:st|nd|rd|th)?$/.test(tokens.at(-1) ?? '')) {
     tokens.pop()
   }
   return tokens.join(' ')
@@ -171,7 +178,7 @@ export function inferSeriesFolder(productTitle: string): string {
   const original = productTitle.trim()
   const series = original
     .replace(/\s*\([^)]*(?:pdf|epub|mobi|cbz)[^)]*\)\s*$/i, '')
-    .replace(/\s*[:-]?\s*(?:vol\.?|volume)\s*#?\s*(?:\d+|[cdilmvx]+)\b.*$/i, '')
+    .replace(/\s*[,:-]?\s*(?:vol\.?|volume)\s*#?\s*(?:\d+|[cdilmvx]+)\b.*$/i, '')
     .replace(/\s*[:-]?\s*book\s*\d+\b.*$/i, '')
     .replace(/\s*#\s*\d+\b.*$/i, '')
     .replace(/\s+issues?\s*#?\s*\d+\b.*$/i, '')

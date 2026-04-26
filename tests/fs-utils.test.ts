@@ -13,6 +13,7 @@ import {
   findExistingPublisherFolders,
   hasSimilarTitle,
   inferPublisherFolder,
+  inferSeriesFolder,
   normalizePublisherFamilyKey,
 } from '../src/utils/fs'
 
@@ -28,6 +29,7 @@ describe('fs utils', () => {
     const folder = buildProductFolder('/downloads', 'Bundle:Name', 'Product+1')
 
     expect(folder).toBe(path.join('/downloads', 'Bundle -Name', 'Product_1'))
+    expect(inferSeriesFolder('Locke & Key, Vol 6')).toBe('Locke  Key')
   })
 
   it('infers publisher folders without hardcoded aliases', () => {
@@ -48,6 +50,9 @@ describe('fs utils', () => {
       normalizePublisherFamilyKey('Kodansha')
     )
     expect(normalizePublisherFamilyKey('Image Comics')).toBe(normalizePublisherFamilyKey('Image'))
+    expect(normalizePublisherFamilyKey('IDW 25th Anniversary Megabundle')).toBe(
+      normalizePublisherFamilyKey('IDW')
+    )
   })
 
   it('prefers existing publisher family folders without named aliases', async () => {

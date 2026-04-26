@@ -716,12 +716,12 @@ describe('organizeLibrary', () => {
           updatedAt: new Date().toISOString(),
           products: [
             {
-              productTitle: 'Current Product',
+              productTitle: 'Locke & Key, Vol 6',
               downloads: [
                 {
-                  cacheKey: 'order-1:current.cbz',
-                  filename: 'current.cbz',
-                  extension: 'cbz',
+                  cacheKey: 'order-1:lockeandkey_vol6.epub',
+                  filename: 'lockeandkey_vol6.epub',
+                  extension: 'epub',
                   platform: 'ebook',
                 },
               ],
@@ -751,6 +751,216 @@ describe('organizeLibrary', () => {
       expect(await pathExists(path.join(comicsPath, 'Humble Comics Bundle - Retired Bundle'))).toBe(
         false
       )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('merges flat publisher alias folders into the canonical publisher folder', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const canonicalFile = path.join(comicsPath, 'IDW', 'Locke Key', 'lockeandkey_vol1.cbz')
+      const aliasFile = path.join(
+        comicsPath,
+        'IDW Publishing',
+        'Locke Key',
+        'lockeandkey_vol1_welcometolovecraft.pdf'
+      )
+      const megabundleFile = path.join(
+        comicsPath,
+        'IDW 25th Anniversary Megabundle',
+        'lockeandkey_vol6.cbz'
+      )
+      const kodanshaFile = path.join(
+        comicsPath,
+        'Kodansha Comics',
+        'Clockwork Planet',
+        'clockworkplanet_vol1.cbz'
+      )
+      await mkdir(path.dirname(canonicalFile), { recursive: true })
+      await mkdir(path.dirname(aliasFile), { recursive: true })
+      await mkdir(path.dirname(megabundleFile), { recursive: true })
+      await mkdir(path.join(comicsPath, 'Kodansha'), { recursive: true })
+      await mkdir(path.dirname(kodanshaFile), { recursive: true })
+      await writeFile(canonicalFile, 'canonical')
+      await writeFile(aliasFile, 'alias pdf')
+      await writeFile(megabundleFile, 'alias cbz')
+      await writeFile(kodanshaFile, 'kodansha alias')
+      await mkdir(path.dirname(configPath), { recursive: true })
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          defaultLibrary: 'comics',
+          libraries: {
+            comics: {
+              path: 'Comics',
+              extInclude: ['cbz', 'pdf'],
+            },
+          },
+        })
+      )
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Comics Bundle: Current Bundle by Example',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Locke & Key, Vol 6',
+              downloads: [
+                {
+                  cacheKey: 'order-1:lockeandkey_vol6.epub',
+                  filename: 'lockeandkey_vol6.epub',
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          configPath,
+          mediaRoot: temporaryDirectory,
+          defaultLibrary: 'comics',
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz', 'pdf'],
+            },
+          },
+        }),
+      })
+
+      expect(report.movedSupplement).toBe(3)
+      expect(
+        await readFile(path.join(comicsPath, 'IDW', 'Locke Key', path.basename(aliasFile)), 'utf8')
+      ).toBe('alias pdf')
+      expect(
+        await readFile(
+          path.join(comicsPath, 'IDW', 'Locke  Key', path.basename(megabundleFile)),
+          'utf8'
+        )
+      ).toBe('alias cbz')
+      expect(
+        await readFile(
+          path.join(comicsPath, 'Kodansha', 'Clockwork Planet', path.basename(kodanshaFile)),
+          'utf8'
+        )
+      ).toBe('kodansha alias')
+      expect(await pathExists(path.join(comicsPath, 'IDW Publishing'))).toBe(false)
+      expect(await pathExists(path.join(comicsPath, 'IDW 25th Anniversary Megabundle'))).toBe(false)
+      expect(await pathExists(path.join(comicsPath, 'Kodansha Comics'))).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('removes publisher alias duplicates that are satisfied by routed flat libraries', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const mangaPath = path.join(temporaryDirectory, 'Manga')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const sourcePath = path.join(comicsPath, 'Kodansha Comics', 'Parasyte', 'parasyte_vol1.cbz')
+      const destinationPath = path.join(mangaPath, 'Kodansha', 'Parasyte', 'parasyte_vol1.cbz')
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await mkdir(path.dirname(destinationPath), { recursive: true })
+      await writeFile(sourcePath, 'same content')
+      await writeFile(destinationPath, 'same content')
+      await mkdir(path.dirname(configPath), { recursive: true })
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          defaultLibrary: 'manga',
+          libraries: {
+            comics: {
+              path: 'Comics',
+              extInclude: ['cbz'],
+            },
+            manga: {
+              path: 'Manga',
+              extInclude: ['cbz'],
+            },
+          },
+        })
+      )
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Manga Bundle: Fantasy by Kodansha Comics',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Parasyte Vol. 1',
+              downloads: [
+                {
+                  cacheKey: 'order-1:parasyte_vol1.cbz',
+                  filename: 'parasyte_vol1.cbz',
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+        'order-2': {
+          orderId: 'order-2',
+          bundleTitle: 'Humble Manga Bundle: Isekai by Kodansha',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Different Product',
+              downloads: [
+                {
+                  cacheKey: 'order-2:different.cbz',
+                  filename: 'different.cbz',
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          configPath,
+          mediaRoot: temporaryDirectory,
+          defaultLibrary: 'manga',
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz'],
+            },
+            manga: {
+              path: mangaPath,
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.removedDuplicate).toBe(1)
+      expect(await pathExists(sourcePath)).toBe(false)
+      expect(await readFile(destinationPath, 'utf8')).toBe('same content')
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
