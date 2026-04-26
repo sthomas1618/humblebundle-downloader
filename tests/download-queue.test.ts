@@ -1001,4 +1001,229 @@ describe('downloadQueue', () => {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
   })
+
+  it('downloads flat libraries into publisher series folders and dedupes repeated products', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async (orderId) => ({
+        product: {
+          human_name:
+            orderId === 'order-1'
+              ? 'Humble Comics Bundle: Saga by Image Comics'
+              : 'Humble Conquer COVID-19 Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Saga Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/files/saga_vol1.cbz',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+    let fetchCount = 0
+    globalThis.fetch = async () => {
+      fetchCount += 1
+      return new Response('cbz content')
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1', 'order-2'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(1)
+      expect(summary.downloaded).toBe(1)
+      expect(fetchCount).toBe(1)
+      expect(
+        await readFile(path.join(comicsPath, 'Image Comics', 'Saga', 'saga_vol1.cbz'), 'utf8')
+      ).toBe('cbz content')
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as Record<string, unknown>
+      expect(cache['order-1:saga_vol1.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache['order-2:saga_vol1.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache['flat:comics:saga_vol_1:saga_vol1.cbz']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache.flatIndex).toMatchObject({
+        version: 1,
+        entries: {
+          'flat:comics:saga_vol_1:saga_vol1.cbz': {
+            canonicalPath: path.join(comicsPath, 'Image Comics', 'Saga', 'saga_vol1.cbz'),
+            publisher: 'Image Comics',
+            series: 'Saga',
+            productTitle: 'Saga Vol. 1',
+            filename: 'saga_vol1.cbz',
+            bundleLocations: [
+              {
+                cacheKey: 'order-1:saga_vol1.cbz',
+                bundlePath: path.join(
+                  comicsPath,
+                  'Humble Comics Bundle - Saga by Image Comics',
+                  'Saga Vol. 1',
+                  'saga_vol1.cbz'
+                ),
+              },
+              {
+                cacheKey: 'order-2:saga_vol1.cbz',
+                bundlePath: path.join(
+                  comicsPath,
+                  'Humble Conquer COVID-19 Bundle',
+                  'Saga Vol. 1',
+                  'saga_vol1.cbz'
+                ),
+              },
+            ],
+          },
+        },
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('backfills flat cache keys when an order-specific cache hit satisfies flat duplicates', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const comicsPath = path.join(temporaryDirectory, 'Comics')
+    const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+    const failureReportPath = path.join(temporaryDirectory, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async (orderId) => ({
+        product: {
+          human_name:
+            orderId === 'order-1'
+              ? 'Humble Comics Bundle: Saga by Image Comics'
+              : 'Humble Conquer COVID-19 Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Saga Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  {
+                    url: {
+                      web: 'https://example.com/files/saga_vol1.cbz',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+    let fetchCount = 0
+    globalThis.fetch = async () => {
+      fetchCount += 1
+      return new Response('cbz content')
+    }
+
+    try {
+      await mkdir(path.dirname(cachePath), { recursive: true })
+      await writeFile(
+        cachePath,
+        `${JSON.stringify({
+          'order-1:saga_vol1.cbz': { urlLastModified: 'Mon, 01 Jan 2024 00:00:00 GMT' },
+        })}\n`
+      )
+
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1', 'order-2'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['cbz'],
+              formatPriority: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(0)
+      expect(summary.downloaded).toBe(0)
+      expect(fetchCount).toBe(0)
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as Record<string, unknown>
+      expect(cache['order-2:saga_vol1.cbz']).toEqual({
+        urlLastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
+      })
+      expect(cache['flat:comics:saga_vol_1:saga_vol1.cbz']).toEqual({
+        urlLastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
+      })
+      expect(cache.flatIndex).toMatchObject({
+        entries: {
+          'flat:comics:saga_vol_1:saga_vol1.cbz': {
+            canonicalPath: path.join(comicsPath, 'Image Comics', 'Saga', 'saga_vol1.cbz'),
+            bundleLocations: [
+              {
+                cacheKey: 'order-1:saga_vol1.cbz',
+              },
+              {
+                cacheKey: 'order-2:saga_vol1.cbz',
+              },
+            ],
+          },
+        },
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
 })

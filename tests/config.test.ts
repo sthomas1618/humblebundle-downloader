@@ -14,6 +14,7 @@ describe('resolveConfig', () => {
       scanLibraries: [
         {
           path: 'Downloaded Library',
+          layout: 'bundle',
           formatPriority: ['cbz', 'epub', 'pdf', 'mobi'],
         },
       ],
@@ -61,10 +62,12 @@ describe('resolveConfig', () => {
       scanLibraries: [
         {
           path: 'My Library',
+          layout: 'bundle',
           formatPriority: ['cbz', 'epub'],
         },
         {
           path: 'Existing Library',
+          layout: 'bundle',
           formatPriority: ['cbz', 'epub'],
         },
       ],
@@ -119,6 +122,7 @@ describe('resolveConfig', () => {
       libraries: {
         comics: {
           path: 'Comics',
+          layout: 'flat',
           formatPriority: ['cbz', 'pdf'],
           extInclude: ['cbz', 'pdf'],
         },
@@ -142,6 +146,8 @@ describe('resolveConfig', () => {
       formatPriority: ['epub', 'pdf', 'mobi'],
       extInclude: ['epub', 'pdf', 'mobi'],
     })
+    expect(config.scanLibraries.find((library) => library.name === 'comics')?.layout).toBe('flat')
+    expect(config.scanLibraries.find((library) => library.name === 'books')?.layout).toBe('bundle')
   })
 
   it('lets CLI values override configured library values', () => {

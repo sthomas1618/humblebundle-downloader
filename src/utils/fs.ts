@@ -29,7 +29,7 @@ export function comparableTitle(title: string): string {
   return title
     .normalize('NFKD')
     .toLowerCase()
-    .replaceAll(/['`‘’]/g, '')
+    .replaceAll(/['`\u2018\u2019]/g, '')
     .replaceAll('&', ' ')
     .replaceAll(/[^\p{Letter}\p{Number}]+/gu, ' ')
     .replaceAll(/\bhumble\b/g, ' ')
@@ -79,6 +79,74 @@ export function buildProductFolder(
   productTitle: string
 ): string {
   return path.join(libraryPath, cleanName(bundleTitle), cleanName(productTitle))
+}
+
+export function inferPublisherFolder(bundleTitle: string): string {
+  const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
+  const publisher =
+    title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
+    title.match(/\bby\s+(.+?)\s*$/i)?.[1] ??
+    title.match(/\bfrom\s+(.+?)\s*$/i)?.[1] ??
+    'humble'
+
+  return cleanName(publisher) || 'humble'
+}
+
+export function inferSeriesFolder(productTitle: string): string {
+  const original = productTitle.trim()
+  const series = original
+    .replace(/\s*\([^)]*(?:pdf|epub|mobi|cbz)[^)]*\)\s*$/i, '')
+    .replace(/\s*[:-]?\s*(?:vol\.?|volume)\s*#?\s*(?:\d+|[cdilmvx]+)\b.*$/i, '')
+    .replace(/\s*[:-]?\s*book\s*\d+\b.*$/i, '')
+    .replace(/\s*#\s*\d+\b.*$/i, '')
+    .replace(/\s+issues?\s*#?\s*\d+\b.*$/i, '')
+    .trim()
+
+  return cleanName(series || original) || cleanName(original) || 'Unknown'
+}
+
+export function normalizeFlatProductKey(productTitle: string): string {
+  return productTitle
+    .normalize('NFKD')
+    .toLowerCase()
+    .replaceAll(/['`\u2018\u2019]/g, '')
+    .replaceAll('&', ' and ')
+    .replaceAll(/[^\p{Letter}\p{Number}]+/gu, ' ')
+    .replaceAll(/\s+/g, ' ')
+    .trim()
+}
+
+export function normalizeFlatPublisherKey(publisher: string): string {
+  return publisher
+    .normalize('NFKD')
+    .toLowerCase()
+    .replaceAll(/['`\u2018\u2019]/g, '')
+    .replaceAll('&', ' and ')
+    .replaceAll(/[^\p{Letter}\p{Number}]+/gu, ' ')
+    .replaceAll(/\s+/g, ' ')
+    .trim()
+}
+
+export function buildFlatProductFolder(
+  libraryPath: string,
+  publisherFolder: string,
+  productTitle: string,
+  seriesFolder = inferSeriesFolder(productTitle)
+): string {
+  return path.join(libraryPath, publisherFolder, seriesFolder)
+}
+
+export function buildLibraryProductFolder(
+  library: { path: string; layout?: 'bundle' | 'flat' },
+  bundleTitle: string,
+  productTitle: string,
+  publisherFolder = inferPublisherFolder(bundleTitle),
+  seriesFolder = inferSeriesFolder(productTitle)
+): string {
+  if (library.layout === 'flat') {
+    return buildFlatProductFolder(library.path, publisherFolder, productTitle, seriesFolder)
+  }
+  return buildProductFolder(library.path, bundleTitle, productTitle)
 }
 
 export function buildTroveFolder(libraryPath: string, title: string): string {

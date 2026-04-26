@@ -31,8 +31,35 @@ export type CacheTransforms = {
   }
 }
 
+export type FlatBundleLocation = {
+  cacheKey: string
+  orderId?: string
+  bundleTitle: string
+  productTitle: string
+  bundlePath: string
+}
+
+export type FlatIndexEntry = {
+  flatCacheKey: string
+  canonicalPath: string
+  libraryName?: string
+  libraryPath: string
+  publisher: string
+  series: string
+  productKey: string
+  productTitle: string
+  filename: string
+  bundleLocations: FlatBundleLocation[]
+}
+
+export type FlatIndex = {
+  version: 1
+  entries: Record<string, FlatIndexEntry>
+}
+
 export type CacheData = Record<string, CacheEntry> & {
   transforms?: CacheTransforms
+  flatIndex?: FlatIndex
 }
 
 const CACHE_FILE = '.cache.json'
@@ -66,6 +93,9 @@ function normalizeCache(data: unknown): CacheData {
     return {}
   }
   const cache = data as CacheData
+  if (cache.flatIndex?.version !== 1 || !cache.flatIndex.entries) {
+    delete cache.flatIndex
+  }
   const transforms = cache.transforms
   const existing = transforms?.pdf?.cbz
   if (existing) {
@@ -76,6 +106,46 @@ function normalizeCache(data: unknown): CacheData {
     cache.transforms = transforms ? { ...transforms, pdf: updatedPdf } : { pdf: updatedPdf }
   }
   return cache
+}
+
+function ensureFlatIndex(cache: CacheData): FlatIndex {
+  if (!cache.flatIndex) {
+    cache.flatIndex = {
+      version: 1,
+      entries: {},
+    }
+  }
+  return cache.flatIndex
+}
+
+export function upsertFlatIndexEntry(
+  cache: CacheData,
+  entry: Omit<FlatIndexEntry, 'bundleLocations'> & { bundleLocation: FlatBundleLocation }
+): void {
+  const flatIndex = ensureFlatIndex(cache)
+  const existing = flatIndex.entries[entry.flatCacheKey]
+  const bundleLocations = existing?.bundleLocations ?? []
+  const existingLocationIndex = bundleLocations.findIndex(
+    (location) => location.cacheKey === entry.bundleLocation.cacheKey
+  )
+  if (existingLocationIndex === -1) {
+    bundleLocations.push(entry.bundleLocation)
+  } else {
+    bundleLocations[existingLocationIndex] = entry.bundleLocation
+  }
+
+  flatIndex.entries[entry.flatCacheKey] = {
+    flatCacheKey: entry.flatCacheKey,
+    canonicalPath: entry.canonicalPath,
+    libraryName: entry.libraryName,
+    libraryPath: entry.libraryPath,
+    publisher: entry.publisher,
+    series: entry.series,
+    productKey: entry.productKey,
+    productTitle: entry.productTitle,
+    filename: entry.filename,
+    bundleLocations,
+  }
 }
 
 export function getPdfCbzEntry(cache: CacheData, pdfKey: string): PdfCbzCacheEntry | undefined {

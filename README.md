@@ -199,6 +199,20 @@ bun run hbd organize --apply --report-path ".hbd/organize-report.json"
 Add `--canonical` if you also want files already inside the right library moved
 into the standard bundle/product folder layout.
 
+Add `--flat` to organize products into publisher/series folders instead of
+bundle/product folders:
+
+```powershell
+bun run hbd organize --flat --apply
+```
+
+Flat organize infers publishers from bundle titles such as `by O'Reilly` or
+`by Image Comics`; products with no inferred publisher are placed under
+`humble`. Repeated products across bundles are collapsed, while different file
+formats for the same product are kept. When applied from a config-backed run,
+configured libraries are marked with `layout: "flat"` so future downloads use
+the same structure and skip already satisfied duplicate products.
+
 Preview empty folders that can be removed from configured library roots:
 
 ```powershell
@@ -303,7 +317,7 @@ Common options mirrored from the Python CLI:
 - `--cache-path <path>`: Cache file path; defaults to `<library-path>/.cache.json`.
 - `--metadata-path <path>`: Metadata snapshot file path; defaults to `<library-path>/.metadata.json`.
 - `hbd doctor`: Validate local setup, cache health, routing, and optional auth/deep metadata checks.
-- `hbd organize`: Move existing selected files into the routed library; dry-run by default, use `--apply` to move files. Add `--canonical` to also normalize folder layout inside the same library.
+- `hbd organize`: Move existing selected files into the routed library; dry-run by default, use `--apply` to move files. Add `--canonical` to also normalize folder layout inside the same library, or `--flat` to use publisher/series folders and mark config-backed libraries flat on apply.
 - `hbd cleanup`: Remove empty folders from configured library roots; dry-run by default, use `--apply` to delete empty folders.
 - `-t, --trove`: Only download Humble Trove content.
 - `-u, --update`: Only check for updates.

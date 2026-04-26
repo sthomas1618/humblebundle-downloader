@@ -29,6 +29,7 @@ const routeConfigKeys = new Set([
 ])
 const libraryConfigKeys = new Set([
   'path',
+  'layout',
   'formatPriority',
   'extInclude',
   'extExclude',
@@ -44,8 +45,11 @@ const forbiddenConfigKeys = new Set([
   'offlineAudit',
 ])
 
+export type LibraryLayout = 'bundle' | 'flat'
+
 export type LibraryPreferences = {
   path: string
+  layout?: LibraryLayout
   platformInclude?: string[]
   extInclude?: string[]
   extExclude?: string[]
@@ -228,6 +232,16 @@ function assertBoolean(value: unknown, field: string): boolean | undefined {
   return value
 }
 
+function assertLibraryLayout(value: unknown, field: string): LibraryLayout | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (value !== 'bundle' && value !== 'flat') {
+    throw new Error(`Config field "${field}" must be "bundle" or "flat".`)
+  }
+  return value
+}
+
 function assertNoForbiddenKeys(keys: string[], location: string): void {
   const forbiddenKey = keys.find((key) => forbiddenConfigKeys.has(key))
   if (forbiddenKey) {
@@ -272,6 +286,7 @@ function normalizeLibraryPreferences(
   const libraryPath = assertString(value.path, `libraries.${name}.path`)
   return {
     path: resolveConfigPathValue(libraryPath, mediaRoot) ?? libraryPath,
+    layout: assertLibraryLayout(value.layout, `libraries.${name}.layout`) ?? 'bundle',
     platformInclude: normalizeValues(
       assertStringArray(value.platformInclude, `libraries.${name}.platformInclude`)
     ),
@@ -718,6 +733,19 @@ export async function createConfigFile(options: ConfigInitOptions): Promise<Conf
   }
 }
 
+export async function markConfigLibrariesFlat(configPath: string): Promise<void> {
+  const data = JSON.parse(await readFile(configPath, 'utf8')) as ConfigFileJson
+  if (!isObject(data.libraries)) {
+    throw new Error('Config field "libraries" must be an object.')
+  }
+
+  for (const library of Object.values(data.libraries)) {
+    library.layout = 'flat'
+  }
+
+  await writeFile(configPath, `${JSON.stringify(data, undefined, 2)}\n`)
+}
+
 function normalizeLibraryMap(
   libraries?: Record<string, LibraryPreferences>
 ): Record<string, LibraryPreferences> {
@@ -725,6 +753,7 @@ function normalizeLibraryMap(
   for (const [name, library] of Object.entries(libraries ?? {})) {
     normalized[name] = {
       path: library.path,
+      layout: library.layout ?? 'bundle',
       platformInclude: normalizeValues(library.platformInclude),
       extInclude: normalizeValues(library.extInclude),
       extExclude: normalizeValues(library.extExclude),
@@ -801,6 +830,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
   const activeLibrary = activeLibraryName ? libraries[activeLibraryName] : undefined
   const libraryPath = overrides.libraryPath ?? activeLibrary?.path ?? 'Downloaded Library'
   const effectiveConfig = {
+    layout: activeLibrary?.layout ?? 'bundle',
     platformInclude: normalizeValues(overrides.platformInclude) ?? activeLibrary?.platformInclude,
     extInclude: normalizeValues(overrides.extInclude) ?? activeLibrary?.extInclude,
     extExclude: normalizeValues(overrides.extExclude) ?? activeLibrary?.extExclude,

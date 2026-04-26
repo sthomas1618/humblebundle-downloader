@@ -40,6 +40,7 @@ describe('config file loading', () => {
         libraries: {
           comics: {
             path: 'Comics/comics',
+            layout: 'flat',
             formatPriority: ['CBZ', 'PDF'],
             extInclude: ['CBZ', 'PDF'],
           },
@@ -64,11 +65,13 @@ describe('config file loading', () => {
         libraries: {
           comics: {
             path: path.join(mediaRoot, 'Comics', 'comics'),
+            layout: 'flat',
             formatPriority: ['cbz', 'pdf'],
             extInclude: ['cbz', 'pdf'],
           },
           books: {
             path: path.join(mediaRoot, 'Books'),
+            layout: 'bundle',
             formatPriority: ['epub', 'pdf', 'mobi'],
             extInclude: ['epub', 'pdf', 'mobi'],
           },
@@ -121,6 +124,11 @@ describe('config file loading', () => {
           version: 1,
           defaultLibrary: 'comics',
           libraries: { comics: { path: 'Comics', sessionAuth: 'secret' } },
+        },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          libraries: { comics: { path: 'Comics', layout: 'shelf' } },
         },
         {
           version: 1,
