@@ -13,8 +13,8 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import path from 'node:path'
 
-import type { AppConfig, ScanLibraryConfig } from '../config'
-import { markConfigLibrariesFlat } from '../config'
+import type { AppConfig, ConflictResolutionMode, ScanLibraryConfig } from '../config'
+import { FLAT_CONFLICT_RESOLUTION_DEFAULT, markConfigLibrariesFlat } from '../config'
 import {
   buildAuditCandidatePaths,
   buildLocalDirectoryIndex,
@@ -56,15 +56,13 @@ export type OrganizeActionStatus =
   | 'would-quarantine-conflict'
   | 'quarantined-conflict'
   | 'missing'
+  | 'untracked'
+  | 'ambiguous'
   | 'conflict'
 
-export type ConflictResolutionMode =
-  | 'report'
-  | 'prefer-flat'
-  | 'prefer-largest'
-  | 'prefer-md5-match'
-
 type ConflictResolutionAction = 'remove-source' | 'replace-destination' | 'quarantine-source'
+
+type PlannedDestinationRegistry = Map<string, OrganizeAction>
 
 export type OrganizeAction = {
   cacheKey: string
@@ -109,6 +107,8 @@ export type OrganizeSummary = {
   wouldQuarantineConflict: number
   quarantinedConflict: number
   missing: number
+  untracked: number
+  ambiguous: number
   conflicts: number
   reportPath?: string
 }
@@ -297,14 +297,40 @@ function getConflictQuarantinePath({
   return path.join(conflictDir, libraryName, relativeSource)
 }
 
+async function resolveConflictByMd5s(
+  action: OrganizeAction,
+  mode: ConflictResolutionMode,
+  md5s: Set<string>
+): Promise<boolean> {
+  if (!action.sourcePath || md5s.size === 0) {
+    return false
+  }
+  const [sourceMd5, destinationMd5] = await Promise.all([
+    fileMd5(action.sourcePath),
+    fileMd5(action.destinationPath),
+  ])
+  action.conflict ??= { mode }
+  action.conflict.sourceMd5 = sourceMd5
+  action.conflict.destinationMd5 = destinationMd5
+  const sourceMatches = sourceMd5 ? md5s.has(sourceMd5) : false
+  const destinationMatches = destinationMd5 ? md5s.has(destinationMd5) : false
+  if (sourceMatches === destinationMatches) {
+    return false
+  }
+  action.conflict.action = sourceMatches ? 'replace-destination' : 'remove-source'
+  return true
+}
+
 async function applyConflictResolution({
   action,
   mode,
   conflictDir,
+  orders,
 }: {
   action: OrganizeAction
   mode: ConflictResolutionMode
   conflictDir?: string
+  orders?: MetadataOrder[]
 }): Promise<void> {
   action.conflict = {
     mode,
@@ -324,23 +350,29 @@ async function applyConflictResolution({
       action.reason = 'Conflict cannot be resolved because metadata md5 is unavailable.'
       return
     }
-    const [sourceMd5, destinationMd5] = await Promise.all([
-      fileMd5(action.sourcePath),
-      fileMd5(action.destinationPath),
-    ])
-    action.conflict.sourceMd5 = sourceMd5
-    action.conflict.destinationMd5 = destinationMd5
-    const sourceMatches = sourceMd5 === action.expectedMd5
-    const destinationMatches = destinationMd5 === action.expectedMd5
-    if (sourceMatches === destinationMatches) {
+    if (!(await resolveConflictByMd5s(action, mode, new Set([action.expectedMd5])))) {
       action.status = 'conflict'
       action.reason = 'Conflict md5 resolution was ambiguous.'
       return
     }
-    action.conflict.action = sourceMatches ? 'replace-destination' : 'remove-source'
   }
 
-  if (mode === 'prefer-largest') {
+  if (mode === 'prefer-known-md5' || mode === 'prefer-known-md5-then-largest') {
+    const knownMd5s = collectKnownConflictMd5s(action, orders ?? [])
+    if (!(await resolveConflictByMd5s(action, mode, knownMd5s)) && mode === 'prefer-known-md5') {
+      action.status = 'conflict'
+      action.reason =
+        knownMd5s.size === 0
+          ? 'Conflict cannot be resolved because no matching metadata md5 is available.'
+          : 'Conflict known-md5 resolution was ambiguous.'
+      return
+    }
+  }
+
+  if (
+    mode === 'prefer-largest' ||
+    (mode === 'prefer-known-md5-then-largest' && !action.conflict.action)
+  ) {
     const sourceSize = action.conflict.sourceSize
     const destinationSize = action.conflict.destinationSize
     if (sourceSize === undefined || destinationSize === undefined) {
@@ -368,6 +400,175 @@ async function applyConflictResolution({
     action.conflict.action === 'replace-destination'
       ? 'Conflict will be resolved by replacing the flat destination.'
       : 'Conflict will be resolved by removing the legacy source.'
+}
+
+async function markPlannedCollisionLoser({
+  loser,
+  loserSize,
+  winnerSize,
+  loserMd5,
+  winnerMd5,
+  mode,
+  conflictDir,
+  reason,
+}: {
+  loser: OrganizeAction
+  loserSize?: number
+  winnerSize?: number
+  loserMd5?: string
+  winnerMd5?: string
+  mode: ConflictResolutionMode
+  conflictDir?: string
+  reason: string
+}): Promise<void> {
+  loser.conflict = {
+    mode,
+    action: 'remove-source',
+    sourceSize: loserSize,
+    destinationSize: winnerSize,
+    sourceMd5: loserMd5,
+    destinationMd5: winnerMd5,
+  }
+  loser.reason = reason
+  if (conflictDir) {
+    loser.conflict.action = 'quarantine-source'
+    loser.conflict.quarantinePath = getConflictQuarantinePath({ conflictDir, action: loser })
+    loser.status = 'would-quarantine-conflict'
+    return
+  }
+  loser.status = 'would-resolve-conflict'
+}
+
+async function resolvePlannedDestinationCollision({
+  action,
+  existingAction,
+  plannedDestinations,
+  plannedDestinationRegistry,
+  mode,
+  conflictDir,
+  orders,
+}: {
+  action: OrganizeAction
+  existingAction: OrganizeAction
+  plannedDestinations: Set<string>
+  plannedDestinationRegistry: PlannedDestinationRegistry
+  mode: ConflictResolutionMode
+  conflictDir?: string
+  orders: MetadataOrder[]
+}): Promise<void> {
+  const normalizedDestination = path.resolve(action.destinationPath).toLowerCase()
+  const [sourceSize, existingSize] = await Promise.all([
+    action.sourcePath ? fileSize(action.sourcePath) : undefined,
+    existingAction.sourcePath ? fileSize(existingAction.sourcePath) : undefined,
+  ])
+
+  if (sourceSize !== undefined && existingSize !== undefined && sourceSize === existingSize) {
+    action.status = 'would-remove-duplicate'
+    action.reason = 'Flat destination is already planned by an equivalent same-size source.'
+    return
+  }
+
+  action.conflict = {
+    mode,
+    sourceSize,
+    destinationSize: existingSize,
+  }
+  if (mode === 'report') {
+    action.status = 'conflict'
+    action.reason = 'Multiple leftover files map to the same flat destination with different sizes.'
+    return
+  }
+
+  const [sourceMd5, existingMd5] = await Promise.all([
+    action.sourcePath ? fileMd5(action.sourcePath) : undefined,
+    existingAction.sourcePath ? fileMd5(existingAction.sourcePath) : undefined,
+  ])
+  action.conflict.sourceMd5 = sourceMd5
+  action.conflict.destinationMd5 = existingMd5
+
+  let winner: OrganizeAction | undefined
+  let reason = 'Planned flat destination collision will be resolved by the configured mode.'
+
+  if (mode === 'prefer-md5-match') {
+    const expectedMd5s = new Set(
+      [action.expectedMd5, existingAction.expectedMd5].filter(
+        (md5): md5 is string => md5 !== undefined
+      )
+    )
+    const sourceMatches = sourceMd5 ? expectedMd5s.has(sourceMd5) : false
+    const existingMatches = existingMd5 ? expectedMd5s.has(existingMd5) : false
+    if (sourceMatches === existingMatches) {
+      action.status = 'conflict'
+      action.reason =
+        expectedMd5s.size === 0
+          ? 'Planned destination collision cannot be resolved because metadata md5 is unavailable.'
+          : 'Planned destination collision md5 resolution was ambiguous.'
+      return
+    }
+    winner = sourceMatches ? action : existingAction
+    reason = 'Planned flat destination collision will keep the exact metadata md5 match.'
+  }
+
+  if (mode === 'prefer-known-md5' || mode === 'prefer-known-md5-then-largest') {
+    const knownMd5s = new Set([
+      ...collectKnownConflictMd5s(action, orders),
+      ...collectKnownConflictMd5s(existingAction, orders),
+    ])
+    const sourceMatches = sourceMd5 ? knownMd5s.has(sourceMd5) : false
+    const existingMatches = existingMd5 ? knownMd5s.has(existingMd5) : false
+    if (sourceMatches !== existingMatches) {
+      winner = sourceMatches ? action : existingAction
+      reason = 'Planned flat destination collision will keep the known metadata md5 match.'
+    } else if (mode === 'prefer-known-md5') {
+      action.status = 'conflict'
+      action.reason =
+        knownMd5s.size === 0
+          ? 'Planned destination collision cannot be resolved because no matching metadata md5 is available.'
+          : 'Planned destination collision known-md5 resolution was ambiguous.'
+      return
+    }
+  }
+
+  if (!winner && (mode === 'prefer-largest' || mode === 'prefer-known-md5-then-largest')) {
+    if (sourceSize === undefined || existingSize === undefined) {
+      action.status = 'conflict'
+      action.reason =
+        'Planned destination collision cannot be resolved because file size is unavailable.'
+      return
+    }
+    winner = sourceSize > existingSize ? action : existingAction
+    reason = 'Planned flat destination collision will keep the largest source file.'
+  }
+
+  if (!winner && mode === 'prefer-flat') {
+    winner = existingAction
+    reason = 'Planned flat destination collision will keep the first planned flat source.'
+  }
+
+  if (!winner) {
+    action.status = 'conflict'
+    action.reason = 'Planned destination collision could not be resolved by the configured mode.'
+    return
+  }
+
+  const loser = winner === action ? existingAction : action
+  await markPlannedCollisionLoser({
+    loser,
+    loserSize: loser === action ? sourceSize : existingSize,
+    winnerSize: winner === action ? sourceSize : existingSize,
+    loserMd5: loser === action ? sourceMd5 : existingMd5,
+    winnerMd5: winner === action ? sourceMd5 : existingMd5,
+    mode,
+    conflictDir,
+    reason,
+  })
+
+  if (winner === action) {
+    action.status = 'would-move-supplement'
+    action.reason = 'Single-level flat leftover file won a planned destination collision.'
+    plannedDestinations.add(normalizedDestination)
+    plannedDestinationRegistry.set(normalizedDestination, action)
+  }
 }
 
 async function findLegacyBundleDuplicateSource(
@@ -475,6 +676,8 @@ function summarizeActions(
     quarantinedConflict: actions.filter((action) => action.status === 'quarantined-conflict')
       .length,
     missing: actions.filter((action) => action.status === 'missing').length,
+    untracked: actions.filter((action) => action.status === 'untracked').length,
+    ambiguous: actions.filter((action) => action.status === 'ambiguous').length,
     conflicts: actions.filter((action) => action.status === 'conflict').length,
   }
 }
@@ -634,6 +837,7 @@ async function planOrganizeAction({
   canonical,
   flat,
   publisherFolder,
+  orders,
   allBundleTitles,
   resolveConflicts,
   conflictDir,
@@ -654,6 +858,7 @@ async function planOrganizeAction({
   canonical: boolean
   flat: boolean
   publisherFolder?: string
+  orders: MetadataOrder[]
   allBundleTitles: string[]
   resolveConflicts: ConflictResolutionMode
   conflictDir?: string
@@ -753,7 +958,7 @@ async function planOrganizeAction({
     action.sourcePath = duplicateSource
     if (!(await sameFileSize(duplicateSource, destinationPath))) {
       action.reason = 'Flat destination exists but differs in file size.'
-      await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
+      await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
       return action
     }
     action.status = 'would-remove-duplicate'
@@ -768,7 +973,7 @@ async function planOrganizeAction({
     ) {
       if (!(await sameFileSize(sourcePath, destinationPath))) {
         action.reason = 'Flat destination exists but differs in file size.'
-        await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
+        await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
         return action
       }
       action.status = 'would-remove-duplicate'
@@ -1072,6 +1277,37 @@ function filenameStem(filename: string): string {
   return path.basename(filename, path.extname(filename)).toLowerCase()
 }
 
+function collectKnownConflictMd5s(action: OrganizeAction, orders: MetadataOrder[]): Set<string> {
+  const md5s = new Set<string>()
+  if (action.expectedMd5) {
+    md5s.add(action.expectedMd5)
+  }
+  const productKey = normalizeFlatProductKey(action.productTitle)
+  const actionFilename = action.filename.toLowerCase()
+  const actionStem = filenameStem(action.filename)
+  if (!productKey || (!actionFilename && !actionStem)) {
+    return md5s
+  }
+
+  for (const order of orders) {
+    for (const product of order.products) {
+      if (normalizeFlatProductKey(product.productTitle) !== productKey) {
+        continue
+      }
+      for (const download of product.downloads) {
+        if (!download.md5) {
+          continue
+        }
+        const downloadFilename = download.filename.toLowerCase()
+        if (downloadFilename === actionFilename || filenameStem(download.filename) === actionStem) {
+          md5s.add(download.md5)
+        }
+      }
+    }
+  }
+  return md5s
+}
+
 function findMetadataProductTitleForFilename(
   filename: string,
   orders: MetadataOrder[]
@@ -1089,6 +1325,104 @@ function findMetadataProductTitleForFilename(
     }
   }
   return matches.size === 1 ? [...matches][0] : undefined
+}
+
+type MetadataDownloadMatch = {
+  order: MetadataOrder
+  product: MetadataProduct
+  download: MetadataProduct['downloads'][number]
+}
+
+type FlatLeftoverMatchResult =
+  | { type: 'matched'; match: MetadataDownloadMatch; exact: boolean }
+  | { type: 'untracked' }
+  | { type: 'ambiguous'; productTitles: string[] }
+
+const suspiciousAllCapsFolderPattern = /^[\d !#&'()+,.:;A-Z[\]_-]+$/
+
+function normalizedFilenameStem(filename: string): string {
+  return filenameStem(filename).replace(/\s+\(\d+\)$/, '')
+}
+
+function shouldScanSingleLevelFlatLeftoverFolder({
+  folderName,
+  directFileCount,
+  childDirectoryCount,
+}: {
+  folderName: string
+  directFileCount: number
+  childDirectoryCount: number
+}): boolean {
+  if (/bundle/i.test(folderName)) {
+    return true
+  }
+  if (!suspiciousAllCapsFolderPattern.test(folderName)) {
+    return false
+  }
+  if (childDirectoryCount > 0) {
+    return false
+  }
+  return directFileCount > 0
+}
+
+function findMetadataDownloadForFlatLeftover(
+  filename: string,
+  orders: MetadataOrder[]
+): FlatLeftoverMatchResult {
+  const localFilename = filename.toLowerCase()
+  const localStem = normalizedFilenameStem(filename)
+  const exactMatches: MetadataDownloadMatch[] = []
+  const stemMatches: MetadataDownloadMatch[] = []
+
+  for (const order of orders) {
+    for (const product of order.products) {
+      for (const download of product.downloads) {
+        const downloadFilename = download.filename.toLowerCase()
+        const match = { order, product, download }
+        if (downloadFilename === localFilename) {
+          exactMatches.push(match)
+        }
+        if (normalizedFilenameStem(download.filename) === localStem) {
+          stemMatches.push(match)
+        }
+      }
+    }
+  }
+
+  return exactMatches.length > 0
+    ? selectMetadataDownloadMatch(exactMatches, true)
+    : selectMetadataDownloadMatch(stemMatches, false)
+}
+
+function selectMetadataDownloadMatch(
+  matches: MetadataDownloadMatch[],
+  exact: boolean
+): FlatLeftoverMatchResult {
+  if (matches.length === 0) {
+    return { type: 'untracked' }
+  }
+  const matchesByProduct = new Map<string, MetadataDownloadMatch[]>()
+  for (const match of matches) {
+    const key = normalizeFlatProductKey(match.product.productTitle)
+    const productMatches = matchesByProduct.get(key) ?? []
+    productMatches.push(match)
+    matchesByProduct.set(key, productMatches)
+  }
+  if (matchesByProduct.size !== 1) {
+    return {
+      type: 'ambiguous',
+      productTitles: [...matchesByProduct.values()]
+        .map((productMatches) => productMatches[0]?.product.productTitle)
+        .filter((productTitle): productTitle is string => productTitle !== undefined)
+        .sort(),
+    }
+  }
+  const productMatches = [...matchesByProduct.values()][0] ?? []
+  return {
+    type: 'matched',
+    match: productMatches[0] as MetadataDownloadMatch,
+    exact,
+  }
 }
 
 function metadataFolderKey(title: string): string {
@@ -1204,6 +1538,203 @@ function firstRoutedLibraryForProduct({
   return selected[0]?.library ?? fallbackLibrary
 }
 
+async function planSingleLevelFlatLeftovers({
+  orders,
+  config,
+  actions,
+  flatPublisherFoldersByProduct,
+  plannedSources,
+  plannedMovesBySource,
+  plannedDestinations,
+  plannedDestinationRegistry,
+  resolveConflicts,
+  conflictDir,
+}: {
+  orders: MetadataOrder[]
+  config: AppConfig
+  actions: OrganizeAction[]
+  flatPublisherFoldersByProduct: Map<string, string>
+  plannedSources: Set<string>
+  plannedMovesBySource: Map<string, string>
+  plannedDestinations: Set<string>
+  plannedDestinationRegistry: PlannedDestinationRegistry
+  resolveConflicts: ConflictResolutionMode
+  conflictDir?: string
+}): Promise<void> {
+  for (const library of config.scanLibraries) {
+    let topLevelEntries
+    try {
+      topLevelEntries = await readdir(library.path, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    const canonicalPublisherByFamily = new Map<string, string>()
+    for (const entry of topLevelEntries.filter((topLevelEntry) => topLevelEntry.isDirectory())) {
+      if (entry.name.toLowerCase() === 'humble' || isHumbleBundleFolder(entry.name)) {
+        continue
+      }
+      const familyKey = normalizePublisherFamilyKey(entry.name)
+      if (!familyKey || familyKey === 'humble') {
+        continue
+      }
+      const current = canonicalPublisherByFamily.get(familyKey)
+      if (
+        !current ||
+        entry.name.length < current.length ||
+        (entry.name.length === current.length && entry.name.localeCompare(current) < 0)
+      ) {
+        canonicalPublisherByFamily.set(familyKey, entry.name)
+      }
+    }
+
+    for (const topLevelEntry of topLevelEntries.filter((entry) => entry.isDirectory())) {
+      if (topLevelEntry.name.toLowerCase() === 'humble') {
+        continue
+      }
+      const publisherFamilyKey = normalizePublisherFamilyKey(topLevelEntry.name)
+      const canonicalPublisher = canonicalPublisherByFamily.get(publisherFamilyKey)
+      if (canonicalPublisher && canonicalPublisher !== topLevelEntry.name) {
+        continue
+      }
+      const topLevelPath = path.join(library.path, topLevelEntry.name)
+      let childEntries
+      try {
+        childEntries = await readdir(topLevelPath, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      if (
+        !shouldScanSingleLevelFlatLeftoverFolder({
+          folderName: topLevelEntry.name,
+          directFileCount: childEntries.filter((entry) => entry.isFile()).length,
+          childDirectoryCount: childEntries.filter((entry) => entry.isDirectory()).length,
+        })
+      ) {
+        continue
+      }
+
+      for (const sourcePath of await collectFiles(topLevelPath)) {
+        const normalizedSource = path.resolve(sourcePath).toLowerCase()
+        if (plannedSources.has(normalizedSource)) {
+          continue
+        }
+        const filename = path.basename(sourcePath)
+        const matchResult = findMetadataDownloadForFlatLeftover(filename, orders)
+        if (matchResult.type !== 'matched') {
+          actions.push({
+            cacheKey: `flat-leftover:${normalizedSource}`,
+            filename,
+            bundleTitle: topLevelEntry.name,
+            productTitle:
+              matchResult.type === 'ambiguous'
+                ? 'Ambiguous flat leftover'
+                : 'Untracked flat leftover',
+            expectedLibraryName: library.name,
+            expectedLibraryPath: library.path,
+            selected: false,
+            sourcePath,
+            destinationPath: sourcePath,
+            status: matchResult.type,
+            reason:
+              matchResult.type === 'ambiguous'
+                ? `Flat leftover filename matches multiple products: ${matchResult.productTitles.join(', ')}.`
+                : 'No metadata match for flat leftover file.',
+          })
+          plannedSources.add(normalizedSource)
+          continue
+        }
+
+        const { order, product, download } = matchResult.match
+        const localCandidate = metadataCandidate({
+          ...download,
+          filename,
+          md5: matchResult.exact ? download.md5 : undefined,
+        })
+        const routedLibrary =
+          selectRoutedDownloadCandidates([localCandidate], config, {
+            bundleTitle: order.bundleTitle,
+            productTitle: product.productTitle,
+          })[0]?.library ??
+          firstRoutedLibraryForProduct({ config, order, product, fallbackLibrary: library })
+        const productKey = normalizeFlatProductKey(product.productTitle)
+        const publisherFolder =
+          flatPublisherFoldersByProduct.get(productKey) ?? inferPublisherFolder(order.bundleTitle)
+        const stableSeriesFolder = await findExistingFlatSeriesFolder(
+          routedLibrary.path,
+          publisherFolder,
+          product.productTitle
+        )
+        const destinationPath = path.join(
+          buildLibraryProductFolder(
+            { ...routedLibrary, layout: 'flat' as const },
+            order.bundleTitle,
+            product.productTitle,
+            publisherFolder,
+            stableSeriesFolder
+          ),
+          filename
+        )
+        const normalizedDestination = path.resolve(destinationPath).toLowerCase()
+        if (normalizedSource === normalizedDestination) {
+          plannedSources.add(normalizedSource)
+          plannedMovesBySource.set(normalizedSource, normalizedDestination)
+          plannedDestinations.add(normalizedDestination)
+          continue
+        }
+
+        const action: OrganizeAction = {
+          cacheKey: `flat-leftover:${normalizedSource}`,
+          filename,
+          bundleTitle: order.bundleTitle,
+          productTitle: product.productTitle,
+          expectedLibraryName: routedLibrary.name,
+          expectedLibraryPath: library.path,
+          selected: false,
+          sourcePath,
+          destinationPath,
+          expectedMd5: matchResult.exact ? download.md5 : undefined,
+          status: 'would-move-supplement',
+          reason: matchResult.exact
+            ? 'Single-level flat leftover file will be moved by metadata filename match.'
+            : 'Single-level flat leftover file will be moved by unique metadata stem match.',
+        }
+
+        if (await pathExists(destinationPath)) {
+          if (await sameFileSize(sourcePath, destinationPath)) {
+            action.status = 'would-remove-duplicate'
+            action.reason = 'Flat destination already satisfies this single-level leftover.'
+          } else {
+            action.reason = 'Flat destination exists but differs in file size.'
+            await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
+          }
+        } else if (plannedDestinations.has(normalizedDestination)) {
+          const existingAction = plannedDestinationRegistry.get(normalizedDestination)
+          if (existingAction) {
+            await resolvePlannedDestinationCollision({
+              action,
+              existingAction,
+              plannedDestinations,
+              plannedDestinationRegistry,
+              mode: resolveConflicts,
+              conflictDir,
+              orders,
+            })
+          } else {
+            action.status = 'conflict'
+            action.reason = 'Destination file is already planned for another candidate.'
+          }
+        } else {
+          plannedDestinations.add(normalizedDestination)
+          plannedDestinationRegistry.set(normalizedDestination, action)
+        }
+        plannedSources.add(normalizedSource)
+        plannedMovesBySource.set(normalizedSource, normalizedDestination)
+        actions.push(action)
+      }
+    }
+  }
+}
+
 async function planFlatLeftovers({
   orders,
   config,
@@ -1231,6 +1762,12 @@ async function planFlatLeftovers({
       .filter((sourcePath): sourcePath is string => sourcePath !== undefined)
       .map((sourcePath) => path.resolve(sourcePath).toLowerCase())
   )
+  const plannedDestinationRegistry: PlannedDestinationRegistry = new Map()
+  for (const action of actions) {
+    if (action.sourcePath && shouldReserveFlatPlannedFile(action)) {
+      plannedDestinationRegistry.set(path.resolve(action.destinationPath).toLowerCase(), action)
+    }
+  }
 
   for (const library of config.scanLibraries) {
     let topLevelEntries
@@ -1312,13 +1849,27 @@ async function planFlatLeftovers({
               action.reason = 'Flat destination already satisfies this supplementary duplicate.'
             } else {
               action.reason = 'Flat destination exists but differs in file size.'
-              await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
+              await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
             }
           } else if (plannedDestinations.has(normalizedDestination)) {
-            action.status = 'conflict'
-            action.reason = 'Destination file is already planned for another candidate.'
+            const existingAction = plannedDestinationRegistry.get(normalizedDestination)
+            if (existingAction) {
+              await resolvePlannedDestinationCollision({
+                action,
+                existingAction,
+                plannedDestinations,
+                plannedDestinationRegistry,
+                mode: resolveConflicts,
+                conflictDir,
+                orders,
+              })
+            } else {
+              action.status = 'conflict'
+              action.reason = 'Destination file is already planned for another candidate.'
+            }
           } else {
             plannedDestinations.add(normalizedDestination)
+            plannedDestinationRegistry.set(normalizedDestination, action)
           }
           plannedSources.add(normalizedSource)
           plannedMovesBySource.set(normalizedSource, normalizedDestination)
@@ -1328,12 +1879,26 @@ async function planFlatLeftovers({
     }
   }
 
+  await planSingleLevelFlatLeftovers({
+    orders,
+    config,
+    actions,
+    flatPublisherFoldersByProduct,
+    plannedSources,
+    plannedMovesBySource,
+    plannedDestinations,
+    plannedDestinationRegistry,
+    resolveConflicts,
+    conflictDir,
+  })
+
   await planFlatPublisherAliasFolders({
     orders,
     config,
     actions,
     plannedMovesBySource,
     plannedDestinations,
+    plannedDestinationRegistry,
     resolveConflicts,
     conflictDir,
   })
@@ -1346,6 +1911,7 @@ async function planFlatPublisherAliasFolders({
   actions,
   plannedMovesBySource,
   plannedDestinations,
+  plannedDestinationRegistry,
   resolveConflicts,
   conflictDir,
 }: {
@@ -1354,6 +1920,7 @@ async function planFlatPublisherAliasFolders({
   actions: OrganizeAction[]
   plannedMovesBySource: Map<string, string>
   plannedDestinations: Set<string>
+  plannedDestinationRegistry: PlannedDestinationRegistry
   resolveConflicts: ConflictResolutionMode
   conflictDir?: string
 }): Promise<void> {
@@ -1444,13 +2011,27 @@ async function planFlatPublisherAliasFolders({
               action.reason = 'Canonical publisher folder already has this same-size file.'
             } else {
               action.reason = 'Canonical publisher folder already has a different file.'
-              await applyConflictResolution({ action, mode: resolveConflicts, conflictDir })
+              await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
             }
           } else if (plannedDestinations.has(normalizedDestination)) {
-            action.status = 'conflict'
-            action.reason = 'Destination file is already planned for another candidate.'
+            const existingAction = plannedDestinationRegistry.get(normalizedDestination)
+            if (existingAction) {
+              await resolvePlannedDestinationCollision({
+                action,
+                existingAction,
+                plannedDestinations,
+                plannedDestinationRegistry,
+                mode: resolveConflicts,
+                conflictDir,
+                orders,
+              })
+            } else {
+              action.status = 'conflict'
+              action.reason = 'Destination file is already planned for another candidate.'
+            }
           } else {
             plannedDestinations.add(normalizedDestination)
+            plannedDestinationRegistry.set(normalizedDestination, action)
           }
           plannedSources.add(normalizedSource)
           plannedMovesBySource.set(normalizedSource, normalizedDestination)
@@ -1610,7 +2191,7 @@ export async function organizeLibrary({
   apply = false,
   canonical = false,
   flat = false,
-  resolveConflicts = 'report',
+  resolveConflicts,
   conflictDir,
   reportPath,
   onProgress,
@@ -1627,13 +2208,26 @@ export async function organizeLibrary({
   if (orders.length === 0) {
     throw new Error('No metadata orders found. Run audit or download first.')
   }
-  if (!flat && resolveConflicts !== 'report') {
-    throw new Error('--resolve-conflicts is only supported with organize --flat.')
+  const conflictModes: ConflictResolutionMode[] = [
+    'report',
+    'prefer-flat',
+    'prefer-largest',
+    'prefer-md5-match',
+    'prefer-known-md5',
+    'prefer-known-md5-then-largest',
+  ]
+  if (resolveConflicts && !conflictModes.includes(resolveConflicts)) {
+    throw new Error(`--resolve-conflicts must be one of: ${conflictModes.join(', ')}.`)
   }
-  if (!['report', 'prefer-flat', 'prefer-largest', 'prefer-md5-match'].includes(resolveConflicts)) {
-    throw new Error(
-      '--resolve-conflicts must be one of: report, prefer-flat, prefer-largest, prefer-md5-match.'
-    )
+  const effectiveResolveConflicts: ConflictResolutionMode = flat
+    ? (resolveConflicts ??
+      config.flatConflictResolution ??
+      (config.scanLibraries.some((library) => library.layout === 'flat')
+        ? FLAT_CONFLICT_RESOLUTION_DEFAULT
+        : 'report'))
+    : (resolveConflicts ?? 'report')
+  if (!flat && effectiveResolveConflicts !== 'report') {
+    throw new Error('--resolve-conflicts is only supported with organize --flat.')
   }
   const flatPublisherFoldersByProduct = flat ? buildPublisherFoldersByProduct(orders) : new Map()
   const allBundleTitles = orders.map((order) => order.bundleTitle)
@@ -1698,8 +2292,9 @@ export async function organizeLibrary({
           publisherFolder: flatPublisherFoldersByProduct.get(
             normalizeFlatProductKey(product.productTitle)
           ),
+          orders,
           allBundleTitles,
-          resolveConflicts,
+          resolveConflicts: effectiveResolveConflicts,
           conflictDir,
           plannedMovesBySource,
           plannedDestinations,
@@ -1753,8 +2348,9 @@ export async function organizeLibrary({
           publisherFolder: flatPublisherFoldersByProduct.get(
             normalizeFlatProductKey(product.productTitle)
           ),
+          orders,
           allBundleTitles,
-          resolveConflicts,
+          resolveConflicts: effectiveResolveConflicts,
           conflictDir,
           plannedMovesBySource,
           plannedDestinations,
@@ -1779,7 +2375,7 @@ export async function organizeLibrary({
       flatPublisherFoldersByProduct,
       plannedMovesBySource,
       plannedDestinations,
-      resolveConflicts,
+      resolveConflicts: effectiveResolveConflicts,
       conflictDir,
     })
   }

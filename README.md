@@ -211,7 +211,13 @@ Flat organize infers publishers from bundle titles such as `by O'Reilly` or
 `humble`. Repeated products across bundles are collapsed, while different file
 formats for the same product are kept. When applied from a config-backed run,
 configured libraries are marked with `layout: "flat"` so future downloads use
-the same structure and skip already satisfied duplicate products.
+the same structure and skip already satisfied duplicate products. Config-backed
+flat libraries default conflict handling to `prefer-known-md5-then-largest`, and
+`organize --flat --apply` writes
+`"flatConflictResolution": "prefer-known-md5-then-largest"` when the field is
+absent. Override a single run with `--resolve-conflicts report`,
+`prefer-flat`, `prefer-largest`, `prefer-md5-match`, `prefer-known-md5`, or
+`prefer-known-md5-then-largest`.
 
 Preview empty folders that can be removed from configured library roots:
 

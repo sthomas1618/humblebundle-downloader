@@ -1,6 +1,7 @@
 import type { Command } from 'commander'
 
-import { organizeLibrary, type ConflictResolutionMode } from '../../organize/organize'
+import type { ConflictResolutionMode } from '../../config'
+import { organizeLibrary } from '../../organize/organize'
 import { resolveCommandConfig } from '../utils/config'
 import { applyCommonOptions } from '../utils/options'
 
@@ -47,8 +48,7 @@ export function registerOrganizeCommand(program: Command): void {
     )
     .option(
       '--resolve-conflicts <mode>',
-      'How --flat resolves conflicts: report, prefer-flat, prefer-largest, prefer-md5-match',
-      'report'
+      'How --flat resolves conflicts: report, prefer-flat, prefer-largest, prefer-md5-match, prefer-known-md5, prefer-known-md5-then-largest'
     )
     .option('--conflict-dir <path>', 'Move losing conflict files into this directory')
     .option('--report-path <path>', 'Write the full organize report to this path')
@@ -112,6 +112,8 @@ export function registerOrganizeCommand(program: Command): void {
           `Would quarantine conflicts: ${report.wouldQuarantineConflict}.`,
           `Quarantined conflicts: ${report.quarantinedConflict}.`,
           `Missing: ${report.missing}.`,
+          `Untracked: ${report.untracked}.`,
+          `Ambiguous: ${report.ambiguous}.`,
           `Conflicts: ${report.conflicts}.`,
         ]
         if (report.reportPath) {
