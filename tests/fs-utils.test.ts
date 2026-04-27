@@ -23,13 +23,14 @@ describe('fs utils', () => {
     expect(cleanName('  Weird@@@Name... ')).toBe('WeirdName')
     expect(cleanName('Hello_World-[2024].')).toBe('Hello_World-[2024]')
     expect(cleanName('..Leading/Trailing...')).toBe('..LeadingTrailing')
+    expect(cleanName('Taylor & Francis')).toBe('Taylor Francis')
   })
 
   it('builds product folder paths', () => {
     const folder = buildProductFolder('/downloads', 'Bundle:Name', 'Product+1')
 
     expect(folder).toBe(path.join('/downloads', 'Bundle -Name', 'Product_1'))
-    expect(inferSeriesFolder('Locke & Key, Vol 6')).toBe('Locke  Key')
+    expect(inferSeriesFolder('Locke & Key, Vol 6')).toBe('Locke Key')
   })
 
   it('infers publisher folders without hardcoded aliases', () => {
@@ -41,6 +42,16 @@ describe('fs utils', () => {
     )
     expect(inferPublisherFolder('Microids: Games & Comics Crossover Collection')).toBe('Microids')
     expect(inferPublisherFolder('No Starch Press: Python and Security')).toBe('No Starch Press')
+    expect(
+      inferPublisherFolder(
+        'Humble Book Bundle: MONOGATARI - Supernatural Light Novels by NISIOISIN from Kodansha'
+      )
+    ).toBe('Kodansha')
+    expect(inferPublisherFolder('Koike by Dark Horse')).toBe('Dark Horse')
+    expect(inferPublisherFolder('Bushcraft & Homestead Handbook Series by Adams Media')).toBe(
+      'Adams Media'
+    )
+    expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor Francis')
     expect(inferPublisherFolder('Humble Book Bundle: Python and Security')).toBe('humble')
   })
 

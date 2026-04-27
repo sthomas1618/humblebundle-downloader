@@ -1364,6 +1364,183 @@ describe('organizeLibrary', () => {
     }
   })
 
+  it('moves creator and topic publisher leftovers into canonical flat folders', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const mangaPath = path.join(temporaryDirectory, 'Manga')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const proseSourcePath = path.join(
+        booksPath,
+        'NISIOISIN from Kodansha',
+        'KIZUMONOGATARI',
+        'kizumonogatari.epub'
+      )
+      const mangaSourcePath = path.join(
+        booksPath,
+        'NISIOISIN from Kodansha',
+        'BAKEMONOGATARI manga',
+        'bakemonogatari_vol1.epub'
+      )
+      const taylorSourcePath = path.join(
+        booksPath,
+        'Game Programming by Taylor & Francis',
+        '3dgameenvironments.prc'
+      )
+      await mkdir(path.dirname(proseSourcePath), { recursive: true })
+      await mkdir(path.dirname(mangaSourcePath), { recursive: true })
+      await mkdir(path.dirname(taylorSourcePath), { recursive: true })
+      await writeFile(proseSourcePath, 'prose')
+      await writeFile(mangaSourcePath, 'manga')
+      await writeFile(taylorSourcePath, 'taylor')
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'books',
+        routes: [
+          {
+            id: 'book-bundles',
+            library: 'books',
+            bundleTitlePatterns: [String.raw`\bbook bundle\b`],
+          },
+          {
+            id: 'manga-products',
+            library: 'manga',
+            productTitlePatterns: [String.raw`\bmanga\b`],
+            filenamePatterns: [String.raw`\bmanga\b`],
+          },
+          {
+            id: 'ebook-formats',
+            library: 'books',
+            extensions: ['epub', 'mobi', 'prc'],
+          },
+        ],
+        libraries: {
+          books: { path: 'Books', layout: 'flat', extInclude: ['epub', 'pdf', 'mobi', 'prc'] },
+          manga: { path: 'Manga', layout: 'flat', extInclude: ['epub', 'pdf', 'cbz'] },
+        },
+      })
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle:
+            'Humble Book Bundle: MONOGATARI - Supernatural Light Novels by NISIOISIN from Kodansha',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'KIZUMONOGATARI',
+              downloads: [
+                {
+                  cacheKey: 'order-1:kizumonogatari.epub',
+                  filename: 'kizumonogatari.epub',
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+            {
+              productTitle: 'BAKEMONOGATARI (manga), volume 1',
+              downloads: [
+                {
+                  cacheKey: 'order-1:bakemonogatari_vol1.epub',
+                  filename: 'bakemonogatari_vol1.epub',
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+        'order-2': {
+          orderId: 'order-2',
+          bundleTitle: 'Humble Tech Book Bundle: Game Programming by Taylor & Francis',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: '3D Game Environments',
+              downloads: [
+                {
+                  cacheKey: 'order-2:3dgameenvironments.prc',
+                  filename: '3dgameenvironments.prc',
+                  extension: 'prc',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          configPath,
+          mediaRoot: temporaryDirectory,
+          defaultLibrary: 'books',
+          metadataPath,
+          routes: [
+            {
+              id: 'book-bundles',
+              library: 'books',
+              bundleTitlePatterns: [String.raw`\bbook bundle\b`],
+            },
+            {
+              id: 'manga-products',
+              library: 'manga',
+              productTitlePatterns: [String.raw`\bmanga\b`],
+              filenamePatterns: [String.raw`\bmanga\b`],
+            },
+            {
+              id: 'ebook-formats',
+              library: 'books',
+              extensions: ['epub', 'mobi', 'prc'],
+            },
+          ],
+          libraries: {
+            books: {
+              path: booksPath,
+              layout: 'flat',
+              extInclude: ['epub', 'pdf', 'mobi', 'prc'],
+            },
+            manga: {
+              path: mangaPath,
+              layout: 'flat',
+              extInclude: ['epub', 'pdf', 'cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.moved).toBe(3)
+      expect(
+        await readFile(
+          path.join(booksPath, 'Kodansha', 'KIZUMONOGATARI', 'kizumonogatari.epub'),
+          'utf8'
+        )
+      ).toBe('prose')
+      expect(
+        await readFile(
+          path.join(mangaPath, 'Kodansha', 'BAKEMONOGATARI manga', 'bakemonogatari_vol1.epub'),
+          'utf8'
+        )
+      ).toBe('manga')
+      expect(
+        await readFile(
+          path.join(booksPath, 'Taylor Francis', '3D Game Environments', '3dgameenvironments.prc'),
+          'utf8'
+        )
+      ).toBe('taylor')
+      expect(await pathExists(path.join(booksPath, 'NISIOISIN from Kodansha'))).toBe(false)
+      expect(await pathExists(path.join(booksPath, 'Game Programming by Taylor & Francis'))).toBe(
+        false
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('reports ambiguous and untracked single-level leftovers without moving them', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 
@@ -1734,7 +1911,7 @@ describe('organizeLibrary', () => {
       ).toBe('alias pdf')
       expect(
         await readFile(
-          path.join(comicsPath, 'IDW', 'Locke  Key', path.basename(megabundleFile)),
+          path.join(comicsPath, 'IDW', 'Locke Key', path.basename(megabundleFile)),
           'utf8'
         )
       ).toBe('alias cbz')
@@ -1847,6 +2024,80 @@ describe('organizeLibrary', () => {
       expect(report.removedDuplicate).toBe(1)
       expect(await pathExists(sourcePath)).toBe(false)
       expect(await readFile(destinationPath, 'utf8')).toBe('same content')
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('removes empty publisher family folders left after flat cleanup', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const kodanshaPath = path.join(comicsPath, 'Kodansha')
+      const kodanshaComicsPath = path.join(comicsPath, 'Kodansha Comics')
+      const unrelatedEmptyPath = path.join(comicsPath, 'Manual Empty Publisher')
+      await mkdir(path.join(kodanshaComicsPath, 'Parasyte'), { recursive: true })
+      await mkdir(kodanshaPath, { recursive: true })
+      await mkdir(unrelatedEmptyPath, { recursive: true })
+      await mkdir(path.dirname(configPath), { recursive: true })
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          defaultLibrary: 'comics',
+          libraries: {
+            comics: {
+              path: 'Comics',
+              extInclude: ['cbz'],
+            },
+          },
+        })
+      )
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Manga Bundle: Fantasy by Kodansha',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Parasyte Vol. 1',
+              downloads: [
+                {
+                  cacheKey: 'order-1:parasyte_vol1.cbz',
+                  filename: 'parasyte_vol1.cbz',
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          configPath,
+          mediaRoot: temporaryDirectory,
+          defaultLibrary: 'comics',
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.removedEmptyFolder).toBeGreaterThanOrEqual(3)
+      expect(await pathExists(kodanshaPath)).toBe(false)
+      expect(await pathExists(kodanshaComicsPath)).toBe(false)
+      expect(await pathExists(unrelatedEmptyPath)).toBe(true)
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }

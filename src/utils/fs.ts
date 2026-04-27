@@ -22,7 +22,7 @@ export function cleanName(dirtyName: string): string {
     })
     .join('')
 
-  return cleaned.trim().replace(/\.+$/, '')
+  return cleaned.trim().replaceAll(/\s+/g, ' ').replace(/\.+$/, '')
 }
 
 export function comparableTitle(title: string): string {
@@ -90,10 +90,12 @@ function inferColonPublisher(title: string): string | undefined {
 
 export function inferPublisherFolder(bundleTitle: string): string {
   const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
+  const byMatches = [...title.matchAll(/\bby\s+(.+?)(?=\s+by\s+|\s*$)/gi)]
+  const finalByPublisher = byMatches.at(-1)?.[1]
   const inferredPublisher =
     title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
-    title.match(/\bby\s+(.+?)\s*$/i)?.[1] ??
     title.match(/\bfrom\s+(.+?)\s*$/i)?.[1] ??
+    finalByPublisher ??
     inferColonPublisher(title) ??
     'humble'
 

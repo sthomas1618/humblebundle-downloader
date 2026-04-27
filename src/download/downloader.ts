@@ -465,8 +465,8 @@ const routeSignalTiers: Record<RouteSignal, number> = {
   extension: 1,
   platform: 1,
   bundleTitle: 1,
-  productTitle: 1,
-  filename: 1,
+  productTitle: 2,
+  filename: 2,
 }
 
 const routeSignalSpecificity: Record<RouteSignal, number> = {

@@ -1201,6 +1201,17 @@ async function applyOrganizeActions(
       await rmdir(action.sourcePath)
       action.status = 'removed-empty-folder'
     } catch (error) {
+      if (error instanceof Error && 'code' in error) {
+        if (error.code === 'ENOENT') {
+          action.status = 'removed-empty-folder'
+          continue
+        }
+        if (error.code === 'ENOTEMPTY') {
+          action.status = 'already-correct'
+          action.reason = 'Folder is no longer empty; cleanup skipped.'
+          continue
+        }
+      }
       action.status = 'conflict'
       action.reason = error instanceof Error ? error.message : String(error)
     }
@@ -1354,6 +1365,9 @@ function shouldScanSingleLevelFlatLeftoverFolder({
   childDirectoryCount: number
 }): boolean {
   if (/bundle/i.test(folderName)) {
+    return true
+  }
+  if (inferPublisherFolder(folderName) !== 'humble') {
     return true
   }
   if (!suspiciousAllCapsFolderPattern.test(folderName)) {
@@ -1902,6 +1916,7 @@ async function planFlatLeftovers({
     resolveConflicts,
     conflictDir,
   })
+  await planFlatEmptyPublisherFamilyFolders({ config, actions })
   await planFlatEmptyLegacyFolders({ orders, config, actions, allBundleTitles })
 }
 
@@ -1940,9 +1955,13 @@ async function planFlatPublisherAliasFolders({
     }
 
     const publisherFoldersByFamily = new Map<string, string[]>()
+    const candidateFolders = new Set<string>()
     for (const entry of topLevelEntries.filter((topLevelEntry) => topLevelEntry.isDirectory())) {
       if (entry.name.toLowerCase() === 'humble' || isHumbleBundleFolder(entry.name)) {
         continue
+      }
+      if (inferPublisherFolder(entry.name) !== 'humble') {
+        candidateFolders.add(entry.name)
       }
       const familyKey = normalizePublisherFamilyKey(entry.name)
       if (!familyKey || familyKey === 'humble') {
@@ -2106,6 +2125,90 @@ async function planFlatEmptyLegacyFolders({
           destinationPath: emptyDirectory,
           status: 'would-remove-empty-folder',
           reason: 'Empty legacy bundle folder will be removed.',
+        })
+      }
+    }
+  }
+}
+
+async function planFlatEmptyPublisherFamilyFolders({
+  config,
+  actions,
+}: {
+  config: AppConfig
+  actions: OrganizeAction[]
+}): Promise<void> {
+  const plannedEmptyFolders = new Set(
+    actions
+      .filter(
+        (action) =>
+          action.status === 'would-remove-empty-folder' || action.status === 'removed-empty-folder'
+      )
+      .map((action) => action.sourcePath)
+      .filter((sourcePath): sourcePath is string => sourcePath !== undefined)
+      .map((sourcePath) => path.resolve(sourcePath).toLowerCase())
+  )
+
+  for (const library of config.scanLibraries) {
+    let topLevelEntries
+    try {
+      topLevelEntries = await readdir(library.path, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    const publisherFoldersByFamily = new Map<string, string[]>()
+    const candidateFolders = new Set<string>()
+    for (const entry of topLevelEntries.filter((topLevelEntry) => topLevelEntry.isDirectory())) {
+      if (entry.name.toLowerCase() === 'humble' || isHumbleBundleFolder(entry.name)) {
+        continue
+      }
+      if (inferPublisherFolder(entry.name) !== 'humble') {
+        candidateFolders.add(entry.name)
+      }
+      const familyKey = normalizePublisherFamilyKey(entry.name)
+      if (!familyKey || familyKey === 'humble') {
+        continue
+      }
+      const folders = publisherFoldersByFamily.get(familyKey) ?? []
+      folders.push(entry.name)
+      publisherFoldersByFamily.set(familyKey, folders)
+    }
+
+    for (const folders of publisherFoldersByFamily.values()) {
+      if (folders.length < 2) {
+        continue
+      }
+      for (const folder of folders) {
+        candidateFolders.add(folder)
+      }
+    }
+
+    for (const folder of candidateFolders) {
+      const publisherPath = path.join(library.path, folder)
+      const emptyDirectories = await collectEmptyDirectories(publisherPath)
+      emptyDirectories.sort((left, right) => right.length - left.length)
+      for (const emptyDirectory of emptyDirectories) {
+        const normalizedEmptyDirectory = path.resolve(emptyDirectory).toLowerCase()
+        if (
+          normalizedEmptyDirectory === path.resolve(library.path).toLowerCase() ||
+          plannedEmptyFolders.has(normalizedEmptyDirectory)
+        ) {
+          continue
+        }
+        plannedEmptyFolders.add(normalizedEmptyDirectory)
+        actions.push({
+          cacheKey: `empty-publisher:${normalizedEmptyDirectory}`,
+          filename: path.basename(emptyDirectory),
+          bundleTitle: folder,
+          productTitle: 'Empty folder',
+          expectedLibraryName: library.name,
+          expectedLibraryPath: library.path,
+          selected: false,
+          sourcePath: emptyDirectory,
+          destinationPath: emptyDirectory,
+          status: 'would-remove-empty-folder',
+          reason: 'Empty flat publisher or topic folder will be removed.',
         })
       }
     }
@@ -2383,8 +2486,12 @@ export async function organizeLibrary({
   if (apply) {
     await applyOrganizeActions(actions, onProgress)
     if (flat) {
-      onProgress?.('Cleaning empty legacy bundle folders...')
+      onProgress?.('Cleaning empty flat folders...')
       const postApplyEmptyStart = actions.length
+      await planFlatEmptyPublisherFamilyFolders({
+        config,
+        actions,
+      })
       await planFlatEmptyLegacyFolders({
         orders,
         config,

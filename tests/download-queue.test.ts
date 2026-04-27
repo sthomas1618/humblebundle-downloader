@@ -773,7 +773,7 @@ describe('downloadQueue', () => {
     }
   })
 
-  it('lets earlier bundle routes win over later product hints', async () => {
+  it('lets explicit product hints override broader bundle routes', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
     const comicsPath = path.join(temporaryDirectory, 'Comics')
     const booksPath = path.join(temporaryDirectory, 'Books')
@@ -894,7 +894,7 @@ describe('downloadQueue', () => {
       expect(summary.queued).toBe(3)
       expect(summary.downloaded).toBe(3)
       expect(downloadedUrls).toEqual([
-        'https://example.com/space-novel.pdf',
+        'https://example.com/space-novel.epub',
         'https://example.com/robot-manga-vol1.cbz',
         'https://example.com/cookbook.pdf',
       ])
@@ -908,15 +908,15 @@ describe('downloadQueue', () => {
       )
       await access(
         path.join(
-          mangaPath,
+          booksPath,
           'Humble Manga Bundle - Mixed Stories',
           'Space Novel',
-          'space-novel.pdf'
+          'space-novel.epub'
         )
       )
       await access(
         path.join(
-          mangaPath,
+          booksPath,
           'Humble Manga Bundle - Mixed Stories',
           'Cookbook Guide',
           'cookbook.pdf'
