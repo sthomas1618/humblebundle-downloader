@@ -1,5 +1,6 @@
 import type { Command } from 'commander'
 
+import type { ConflictResolutionMode } from '../../config'
 import { organizeLibrary } from '../../organize/organize'
 import { resolveCommandConfig } from '../utils/config'
 import { applyCommonOptions } from '../utils/options'
@@ -22,6 +23,8 @@ type OrganizeOptions = {
   apply?: boolean
   canonical?: boolean
   flat?: boolean
+  resolveConflicts?: ConflictResolutionMode
+  conflictDir?: string
   reportPath?: string
   json?: boolean
   verbose?: boolean
@@ -43,6 +46,11 @@ export function registerOrganizeCommand(program: Command): void {
       '--flat',
       'Organize products into publisher/series folders and mark applied libraries flat'
     )
+    .option(
+      '--resolve-conflicts <mode>',
+      'How --flat resolves conflicts: report, prefer-flat, prefer-largest, prefer-md5-match, prefer-known-md5, prefer-known-md5-then-largest'
+    )
+    .option('--conflict-dir <path>', 'Move losing conflict files into this directory')
     .option('--report-path <path>', 'Write the full organize report to this path')
     .option('--json', 'Print the full organize report as JSON')
     .option('--verbose', 'Print each planned move, missing file, and conflict')
@@ -56,6 +64,8 @@ export function registerOrganizeCommand(program: Command): void {
           apply: options.apply,
           canonical: options.canonical,
           flat: options.flat,
+          resolveConflicts: options.resolveConflicts,
+          conflictDir: options.conflictDir,
           reportPath: options.reportPath,
           onProgress: options.json ? undefined : (message) => console.info(message),
         })
@@ -91,7 +101,19 @@ export function registerOrganizeCommand(program: Command): void {
           `Already correct: ${report.alreadyCorrect}.`,
           `Would move: ${report.wouldMove}.`,
           `Moved: ${report.moved}.`,
+          `Would move supplements: ${report.wouldMoveSupplement}.`,
+          `Moved supplements: ${report.movedSupplement}.`,
+          `Would remove duplicates: ${report.wouldRemoveDuplicate}.`,
+          `Removed duplicates: ${report.removedDuplicate}.`,
+          `Would remove empty folders: ${report.wouldRemoveEmptyFolder}.`,
+          `Removed empty folders: ${report.removedEmptyFolder}.`,
+          `Would resolve conflicts: ${report.wouldResolveConflict}.`,
+          `Resolved conflicts: ${report.resolvedConflict}.`,
+          `Would quarantine conflicts: ${report.wouldQuarantineConflict}.`,
+          `Quarantined conflicts: ${report.quarantinedConflict}.`,
           `Missing: ${report.missing}.`,
+          `Untracked: ${report.untracked}.`,
+          `Ambiguous: ${report.ambiguous}.`,
           `Conflicts: ${report.conflicts}.`,
         ]
         if (report.reportPath) {

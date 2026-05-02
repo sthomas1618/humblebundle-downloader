@@ -12,6 +12,7 @@ const CONFIG_ENV_VAR = 'HBD_CONFIG'
 const topLevelConfigKeys = new Set([
   'version',
   'defaultLibrary',
+  'flatConflictResolution',
   'cachePath',
   'failureReportPath',
   'metadataPath',
@@ -47,6 +48,26 @@ const forbiddenConfigKeys = new Set([
 
 export type LibraryLayout = 'bundle' | 'flat'
 
+export type ConflictResolutionMode =
+  | 'report'
+  | 'prefer-flat'
+  | 'prefer-largest'
+  | 'prefer-md5-match'
+  | 'prefer-known-md5'
+  | 'prefer-known-md5-then-largest'
+
+export const FLAT_CONFLICT_RESOLUTION_DEFAULT: ConflictResolutionMode =
+  'prefer-known-md5-then-largest'
+
+const conflictResolutionModes: ConflictResolutionMode[] = [
+  'report',
+  'prefer-flat',
+  'prefer-largest',
+  'prefer-md5-match',
+  'prefer-known-md5',
+  'prefer-known-md5-then-largest',
+]
+
 export type LibraryPreferences = {
   path: string
   layout?: LibraryLayout
@@ -76,6 +97,7 @@ export type ConfigFileOverrides = {
   configPath: string
   mediaRoot: string
   defaultLibrary: string
+  flatConflictResolution?: ConflictResolutionMode
   libraries: Record<string, LibraryPreferences>
   routes: LibraryRoute[]
   cachePath?: string
@@ -99,6 +121,8 @@ export type AppConfig = {
   mediaRoot?: string
   /** Active configured library name selected for downloads. */
   libraryName?: string
+  /** Default conflict resolution mode for config-backed flat organize runs. */
+  flatConflictResolution?: ConflictResolutionMode
   /** Whether scan libraries came from a named config file. */
   hasConfiguredLibraries: boolean
   /** Destination routes. Earlier routes take precedence when multiple routes match. */
@@ -143,6 +167,7 @@ export type ConfigOverrides = {
   configPath?: string
   mediaRoot?: string
   defaultLibrary?: string
+  flatConflictResolution?: ConflictResolutionMode
   libraryName?: string
   libraries?: Record<string, LibraryPreferences>
   routes?: LibraryRoute[]
@@ -186,6 +211,7 @@ export type ConfigInitResult = {
 type ConfigFileJson = {
   version: number
   defaultLibrary: string
+  flatConflictResolution?: ConflictResolutionMode
   cachePath?: string
   failureReportPath?: string
   metadataPath?: string
@@ -240,6 +266,24 @@ function assertLibraryLayout(value: unknown, field: string): LibraryLayout | und
     throw new Error(`Config field "${field}" must be "bundle" or "flat".`)
   }
   return value
+}
+
+function assertConflictResolutionMode(
+  value: unknown,
+  field: string
+): ConflictResolutionMode | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (
+    typeof value !== 'string' ||
+    !conflictResolutionModes.includes(value as ConflictResolutionMode)
+  ) {
+    throw new Error(
+      `Config field "${field}" must be one of: ${conflictResolutionModes.join(', ')}.`
+    )
+  }
+  return value as ConflictResolutionMode
 }
 
 function assertNoForbiddenKeys(keys: string[], location: string): void {
@@ -420,6 +464,10 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
   }
 
   const defaultLibrary = assertString(data.defaultLibrary, 'defaultLibrary')
+  const flatConflictResolution = assertConflictResolutionMode(
+    data.flatConflictResolution,
+    'flatConflictResolution'
+  )
   if (!isObject(data.libraries)) {
     throw new Error('Config field "libraries" must be an object.')
   }
@@ -464,6 +512,7 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
   return {
     version: CONFIG_VERSION,
     defaultLibrary,
+    flatConflictResolution,
     cachePath,
     failureReportPath,
     metadataPath,
@@ -537,6 +586,7 @@ export async function loadConfigFile(configPath: string): Promise<LoadedConfigFi
       configPath: resolvedConfigPath,
       mediaRoot,
       defaultLibrary: configFile.defaultLibrary,
+      flatConflictResolution: configFile.flatConflictResolution,
       libraries: configFile.libraries,
       routes: configFile.routes ?? [],
       cachePath: configFile.cachePath,
@@ -742,6 +792,7 @@ export async function markConfigLibrariesFlat(configPath: string): Promise<void>
   for (const library of Object.values(data.libraries)) {
     library.layout = 'flat'
   }
+  data.flatConflictResolution ??= FLAT_CONFLICT_RESOLUTION_DEFAULT
 
   await writeFile(configPath, `${JSON.stringify(data, undefined, 2)}\n`)
 }
@@ -853,6 +904,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     configPath: overrides.configPath,
     mediaRoot: overrides.mediaRoot,
     libraryName: activeLibraryName,
+    flatConflictResolution: overrides.flatConflictResolution,
     hasConfiguredLibraries,
     routes,
     cookieFile: overrides.cookieFile,

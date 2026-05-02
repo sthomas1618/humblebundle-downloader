@@ -7,4 +7,5 @@ node_modules/
 .hbd-*.log
 .hbd-*.pid
 .hbd-*.json
+hbd-*.md
 typescript/node_modules/

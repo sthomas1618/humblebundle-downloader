@@ -11,9 +11,11 @@ import {
   buildProductFolder,
   buildTroveFolder,
   cleanName,
+  findExistingPublisherFolders,
   inferPublisherFolder,
   inferSeriesFolder,
   normalizeFlatProductKey,
+  resolvePublisherFolder,
   hasSimilarTitle,
 } from '../utils/fs'
 import {
@@ -463,8 +465,8 @@ const routeSignalTiers: Record<RouteSignal, number> = {
   extension: 1,
   platform: 1,
   bundleTitle: 1,
-  productTitle: 1,
-  filename: 1,
+  productTitle: 2,
+  filename: 2,
 }
 
 const routeSignalSpecificity: Record<RouteSignal, number> = {
@@ -1144,8 +1146,12 @@ export async function downloadLibrary({
           const cacheKey = `${orderId}:${candidate.filename}`
           const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
           const cacheEntry = cache[cacheKey] ?? (flatCacheKey ? cache[flatCacheKey] : undefined)
+          const publisherFolder =
+            library.layout === 'flat'
+              ? await resolvePublisherFolder(library.path, inferPublisherFolder(bundleTitle))
+              : undefined
           const expectedDestination = path.join(
-            buildLibraryProductFolder(library, bundleTitle, product.human_name),
+            buildLibraryProductFolder(library, bundleTitle, product.human_name, publisherFolder),
             candidate.filename
           )
           const plannedFlatDownloadItem = flatCacheKey
@@ -1419,8 +1425,12 @@ export async function inspectDownloadState({
       for (const { candidate, library, routing } of selectedCandidates) {
         const cacheKey = `${orderId}:${candidate.filename}`
         const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
+        const publisherFolder =
+          library.layout === 'flat'
+            ? await resolvePublisherFolder(library.path, inferPublisherFolder(bundleTitle))
+            : undefined
         const expectedDestination = path.join(
-          buildLibraryProductFolder(library, bundleTitle, product.human_name),
+          buildLibraryProductFolder(library, bundleTitle, product.human_name, publisherFolder),
           candidate.filename
         )
         const localPath = await findAuditFile(
@@ -1586,14 +1596,16 @@ export async function buildAuditCandidatePaths(
     const productFolder =
       (await findExistingDirectory(bundleFolder, productTitle)) ??
       buildProductFolder(libraryPath, bundleTitle, productTitle)
-    const flatProductFolder = path.join(
-      libraryPath,
-      inferPublisherFolder(bundleTitle),
-      inferSeriesFolder(productTitle)
-    )
+    const inferredPublisherFolder = inferPublisherFolder(bundleTitle)
+    const flatProductFolders = [
+      ...(await findExistingPublisherFolders(libraryPath, inferredPublisherFolder)),
+      inferredPublisherFolder,
+    ]
+      .filter((folder, index, folders) => folders.indexOf(folder) === index)
+      .map((folder) => path.join(libraryPath, folder, inferSeriesFolder(productTitle)))
 
     paths.push(
-      path.join(flatProductFolder, ...segments),
+      ...flatProductFolders.map((flatProductFolder) => path.join(flatProductFolder, ...segments)),
       path.join(productFolder, ...segments),
       path.join(defaultProductFolder, ...segments),
       path.join(bundleFolder, ...segments),

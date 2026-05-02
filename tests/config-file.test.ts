@@ -36,6 +36,7 @@ describe('config file loading', () => {
         cachePath: '.hbd/cache.json',
         failureReportPath: '.hbd/download-failures.json',
         metadataPath: '.hbd/metadata.json',
+        flatConflictResolution: 'prefer-known-md5-then-largest',
         routes: [{ extensions: ['EPUB', 'MOBI'], library: 'books' }],
         libraries: {
           comics: {
@@ -61,6 +62,7 @@ describe('config file loading', () => {
         cachePath: path.join(mediaRoot, '.hbd', 'cache.json'),
         failureReportPath: path.join(mediaRoot, '.hbd', 'download-failures.json'),
         metadataPath: path.join(mediaRoot, '.hbd', 'metadata.json'),
+        flatConflictResolution: 'prefer-known-md5-then-largest',
         routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
         libraries: {
           comics: {
@@ -118,6 +120,12 @@ describe('config file loading', () => {
           version: 1,
           defaultLibrary: 'comics',
           unknown: true,
+          libraries: { comics: { path: 'Comics' } },
+        },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          flatConflictResolution: 'largest-ish',
           libraries: { comics: { path: 'Comics' } },
         },
         {

@@ -10,7 +10,11 @@ import {
   cleanName,
   comparableTitle,
   ensureDirectory,
+  findExistingPublisherFolders,
   hasSimilarTitle,
+  inferPublisherFolder,
+  inferSeriesFolder,
+  normalizePublisherFamilyKey,
 } from '../src/utils/fs'
 
 describe('fs utils', () => {
@@ -19,12 +23,70 @@ describe('fs utils', () => {
     expect(cleanName('  Weird@@@Name... ')).toBe('WeirdName')
     expect(cleanName('Hello_World-[2024].')).toBe('Hello_World-[2024]')
     expect(cleanName('..Leading/Trailing...')).toBe('..LeadingTrailing')
+    expect(cleanName('Taylor & Francis')).toBe('Taylor Francis')
   })
 
   it('builds product folder paths', () => {
     const folder = buildProductFolder('/downloads', 'Bundle:Name', 'Product+1')
 
     expect(folder).toBe(path.join('/downloads', 'Bundle -Name', 'Product_1'))
+    expect(inferSeriesFolder('Locke & Key, Vol 6')).toBe('Locke Key')
+  })
+
+  it('infers publisher folders without hardcoded aliases', () => {
+    expect(inferPublisherFolder('Humble Comics Bundle: Star Trek 2019 by IDW Publishing')).toBe(
+      'IDW Publishing'
+    )
+    expect(inferPublisherFolder('Humble Manga Bundle: Fantasy by Kodansha Comics')).toBe(
+      'Kodansha Comics'
+    )
+    expect(inferPublisherFolder('Microids: Games & Comics Crossover Collection')).toBe('Microids')
+    expect(inferPublisherFolder('No Starch Press: Python and Security')).toBe('No Starch Press')
+    expect(
+      inferPublisherFolder(
+        'Humble Book Bundle: MONOGATARI - Supernatural Light Novels by NISIOISIN from Kodansha'
+      )
+    ).toBe('Kodansha')
+    expect(inferPublisherFolder('Koike by Dark Horse')).toBe('Dark Horse')
+    expect(inferPublisherFolder('Bushcraft & Homestead Handbook Series by Adams Media')).toBe(
+      'Adams Media'
+    )
+    expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor Francis')
+    expect(inferPublisherFolder('Humble Book Bundle: Python and Security')).toBe('humble')
+  })
+
+  it('groups publisher variants by normalized family suffixes', () => {
+    expect(normalizePublisherFamilyKey('IDW Publishing')).toBe(normalizePublisherFamilyKey('IDW'))
+    expect(normalizePublisherFamilyKey('Kodansha Comics')).toBe(
+      normalizePublisherFamilyKey('Kodansha')
+    )
+    expect(normalizePublisherFamilyKey('Image Comics')).toBe(normalizePublisherFamilyKey('Image'))
+    expect(normalizePublisherFamilyKey('IDW 25th Anniversary Megabundle')).toBe(
+      normalizePublisherFamilyKey('IDW')
+    )
+  })
+
+  it('prefers existing publisher family folders without named aliases', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-fs-test-'))
+
+    try {
+      await ensureDirectory(path.join(temporaryRoot, 'IDW', 'Series', 'book.cbz'))
+      await ensureDirectory(path.join(temporaryRoot, 'IDW Publishing', 'Series', 'book.cbz'))
+      await ensureDirectory(
+        path.join(temporaryRoot, 'IDW 25th Anniversary Megabundle', 'Series', 'book.cbz')
+      )
+
+      await expect(findExistingPublisherFolders(temporaryRoot, 'IDW Publishing')).resolves.toEqual([
+        'IDW',
+        'IDW Publishing',
+      ])
+      await expect(findExistingPublisherFolders(temporaryRoot, 'IDW')).resolves.toEqual([
+        'IDW',
+        'IDW Publishing',
+      ])
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
   })
 
   it('matches shortened legacy bundle titles to Humble titles', () => {

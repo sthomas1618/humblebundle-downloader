@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir } from 'node:fs/promises'
 import path from 'node:path'
 
 /**
@@ -22,7 +22,7 @@ export function cleanName(dirtyName: string): string {
     })
     .join('')
 
-  return cleaned.trim().replace(/\.+$/, '')
+  return cleaned.trim().replaceAll(/\s+/g, ' ').replace(/\.+$/, '')
 }
 
 export function comparableTitle(title: string): string {
@@ -81,22 +81,115 @@ export function buildProductFolder(
   return path.join(libraryPath, cleanName(bundleTitle), cleanName(productTitle))
 }
 
+function inferColonPublisher(title: string): string | undefined {
+  if (/^humble\b/i.test(title)) {
+    return undefined
+  }
+  return title.match(/^([^:]+):\s+.+$/i)?.[1]
+}
+
 export function inferPublisherFolder(bundleTitle: string): string {
   const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
-  const publisher =
+  const byMatches = [...title.matchAll(/\bby\s+(.+?)(?=\s+by\s+|\s*$)/gi)]
+  const finalByPublisher = byMatches.at(-1)?.[1]
+  const inferredPublisher =
     title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
-    title.match(/\bby\s+(.+?)\s*$/i)?.[1] ??
     title.match(/\bfrom\s+(.+?)\s*$/i)?.[1] ??
+    finalByPublisher ??
+    inferColonPublisher(title) ??
     'humble'
 
-  return cleanName(publisher) || 'humble'
+  return cleanName(inferredPublisher) || 'humble'
+}
+
+const PUBLISHER_SUFFIX_WORDS = new Set([
+  'book',
+  'books',
+  'comic',
+  'comics',
+  'company',
+  'entertainment',
+  'game',
+  'games',
+  'group',
+  'inc',
+  'lab',
+  'labs',
+  'limited',
+  'llc',
+  'ltd',
+  'media',
+  'press',
+  'production',
+  'productions',
+  'publisher',
+  'publishers',
+  'publishing',
+  'studio',
+  'studios',
+  'megabundle',
+  'anniversary',
+  'collection',
+  'bundle',
+])
+
+export function normalizePublisherFamilyKey(publisherFolder: string): string {
+  const tokens = normalizeFlatPublisherKey(publisherFolder).split(' ').filter(Boolean)
+  while (tokens.length > 1 && PUBLISHER_SUFFIX_WORDS.has(tokens.at(-1) ?? '')) {
+    tokens.pop()
+  }
+  while (tokens.length > 1 && /^\d+(?:st|nd|rd|th)?$/.test(tokens.at(-1) ?? '')) {
+    tokens.pop()
+  }
+  return tokens.join(' ')
+}
+
+function isLegacyBundleLikePublisherFolder(publisherFolder: string): boolean {
+  const key = normalizeFlatPublisherKey(publisherFolder)
+  return /\b(?:bundle|megabundle)\b/.test(key)
+}
+
+export async function findExistingPublisherFolders(
+  libraryPath: string,
+  publisherFolder: string
+): Promise<string[]> {
+  const familyKey = normalizePublisherFamilyKey(publisherFolder)
+
+  try {
+    const entries = await readdir(libraryPath, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter(
+        (entryName) =>
+          normalizePublisherFamilyKey(entryName) === familyKey &&
+          !isLegacyBundleLikePublisherFolder(entryName)
+      )
+      .sort((left, right) => {
+        const lengthDifference = left.length - right.length
+        if (lengthDifference !== 0) {
+          return lengthDifference
+        }
+        return left.localeCompare(right)
+      })
+  } catch {
+    return []
+  }
+}
+
+export async function resolvePublisherFolder(
+  libraryPath: string,
+  publisherFolder: string
+): Promise<string> {
+  const existingPublisherFolders = await findExistingPublisherFolders(libraryPath, publisherFolder)
+  return existingPublisherFolders[0] ?? publisherFolder
 }
 
 export function inferSeriesFolder(productTitle: string): string {
   const original = productTitle.trim()
   const series = original
     .replace(/\s*\([^)]*(?:pdf|epub|mobi|cbz)[^)]*\)\s*$/i, '')
-    .replace(/\s*[:-]?\s*(?:vol\.?|volume)\s*#?\s*(?:\d+|[cdilmvx]+)\b.*$/i, '')
+    .replace(/\s*[,:-]?\s*(?:vol\.?|volume)\s*#?\s*(?:\d+|[cdilmvx]+)\b.*$/i, '')
     .replace(/\s*[:-]?\s*book\s*\d+\b.*$/i, '')
     .replace(/\s*#\s*\d+\b.*$/i, '')
     .replace(/\s+issues?\s*#?\s*\d+\b.*$/i, '')
