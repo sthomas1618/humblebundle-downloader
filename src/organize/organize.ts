@@ -1344,8 +1344,15 @@ type MetadataDownloadMatch = {
   download: MetadataProduct['downloads'][number]
 }
 
+type FlatLeftoverMatchKind = 'exact' | 'stem' | 'legacy-stem'
+
 type FlatLeftoverMatchResult =
-  | { type: 'matched'; match: MetadataDownloadMatch; exact: boolean }
+  | {
+      type: 'matched'
+      match: MetadataDownloadMatch
+      exact: boolean
+      matchKind: FlatLeftoverMatchKind
+    }
   | { type: 'untracked' }
   | { type: 'ambiguous'; productTitles: string[] }
 
@@ -1353,6 +1360,25 @@ const suspiciousAllCapsFolderPattern = /^[\d !#&'()+,.:;A-Z[\]_-]+$/
 
 function normalizedFilenameStem(filename: string): string {
   return filenameStem(filename).replace(/\s+\(\d+\)$/, '')
+}
+
+function legacyHumbleArchiveStem(filename: string): string {
+  const stem = normalizedFilenameStem(filename)
+    .replace(/[\s_-]+\d{9,}$/, '')
+    .replaceAll(/[^\da-z]+/g, '_')
+  const tokens = stem.split('_').filter(Boolean)
+  const normalizedTokens: string[] = []
+  for (const token of tokens) {
+    if (/^\d{9,}$/.test(token)) {
+      continue
+    }
+    if (/^(azw3|cbz|epub|mobi|pdf|prc|zip)$/.test(token)) {
+      continue
+    }
+    const volumeMatch = token.match(/^(?:s?vol(?:ume)?|v)0*(\d+)$/)
+    normalizedTokens.push(volumeMatch ? `vol${Number(volumeMatch[1])}` : token)
+  }
+  return normalizedTokens.join('')
 }
 
 function shouldScanSingleLevelFlatLeftoverFolder({
@@ -1385,8 +1411,10 @@ function findMetadataDownloadForFlatLeftover(
 ): FlatLeftoverMatchResult {
   const localFilename = filename.toLowerCase()
   const localStem = normalizedFilenameStem(filename)
+  const localLegacyStem = legacyHumbleArchiveStem(filename)
   const exactMatches: MetadataDownloadMatch[] = []
   const stemMatches: MetadataDownloadMatch[] = []
+  const legacyStemMatches: MetadataDownloadMatch[] = []
 
   for (const order of orders) {
     for (const product of order.products) {
@@ -1399,18 +1427,25 @@ function findMetadataDownloadForFlatLeftover(
         if (normalizedFilenameStem(download.filename) === localStem) {
           stemMatches.push(match)
         }
+        if (localLegacyStem && legacyHumbleArchiveStem(download.filename) === localLegacyStem) {
+          legacyStemMatches.push(match)
+        }
       }
     }
   }
 
-  return exactMatches.length > 0
-    ? selectMetadataDownloadMatch(exactMatches, true)
-    : selectMetadataDownloadMatch(stemMatches, false)
+  if (exactMatches.length > 0) {
+    return selectMetadataDownloadMatch(exactMatches, 'exact')
+  }
+  if (stemMatches.length > 0) {
+    return selectMetadataDownloadMatch(stemMatches, 'stem')
+  }
+  return selectMetadataDownloadMatch(legacyStemMatches, 'legacy-stem')
 }
 
 function selectMetadataDownloadMatch(
   matches: MetadataDownloadMatch[],
-  exact: boolean
+  matchKind: FlatLeftoverMatchKind
 ): FlatLeftoverMatchResult {
   if (matches.length === 0) {
     return { type: 'untracked' }
@@ -1435,7 +1470,8 @@ function selectMetadataDownloadMatch(
   return {
     type: 'matched',
     match: productMatches[0] as MetadataDownloadMatch,
-    exact,
+    exact: matchKind === 'exact',
+    matchKind,
   }
 }
 
@@ -1708,9 +1744,12 @@ async function planSingleLevelFlatLeftovers({
           destinationPath,
           expectedMd5: matchResult.exact ? download.md5 : undefined,
           status: 'would-move-supplement',
-          reason: matchResult.exact
-            ? 'Single-level flat leftover file will be moved by metadata filename match.'
-            : 'Single-level flat leftover file will be moved by unique metadata stem match.',
+          reason:
+            matchResult.matchKind === 'exact'
+              ? 'Single-level flat leftover file will be moved by metadata filename match.'
+              : matchResult.matchKind === 'stem'
+                ? 'Single-level flat leftover file will be moved by unique metadata stem match.'
+                : 'Single-level flat leftover file will be moved by legacy Humble archive stem match.',
         }
 
         if (await pathExists(destinationPath)) {

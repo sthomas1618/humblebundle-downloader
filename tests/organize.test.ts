@@ -857,6 +857,154 @@ describe('organizeLibrary', () => {
     }
   })
 
+  it('moves legacy Humble archive zips by normalized archive stem', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const sourcePath = path.join(
+        comicsPath,
+        'DYNAMITE 20TH ANNIVERSARY 20,000-PAGE MEGA BUNDLE',
+        'projectsuperpowers_vol1_cbz_1403295425.zip'
+      )
+      const destinationPath = path.join(
+        comicsPath,
+        'humble',
+        'Project Superpowers',
+        'projectsuperpowers_vol1_cbz_1403295425.zip'
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'legacy archive')
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'comics',
+        libraries: { comics: { path: 'Comics', layout: 'flat', extInclude: ['pdf', 'zip'] } },
+      })
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Comics Bundle: Dynamite 20th Anniversary 20,000-Page Mega Bundle',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Project Superpowers, Vol. 1',
+              downloads: [
+                {
+                  cacheKey: 'order-1:projectsuperpowers_svol1_1403556328.pdf',
+                  filename: 'projectsuperpowers_svol1_1403556328.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          configPath,
+          mediaRoot: temporaryDirectory,
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['pdf', 'zip'],
+            },
+          },
+        }),
+      })
+
+      expect(report.movedSupplement).toBe(1)
+      expect(report.untracked).toBe(0)
+      expect(await readFile(destinationPath, 'utf8')).toBe('legacy archive')
+      expect(await pathExists(sourcePath)).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('removes same-size legacy Humble archive zip duplicates', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const filename = 'projectsuperpowers_vol1_cbz_1403295425.zip'
+      const sourcePath = path.join(
+        comicsPath,
+        'DYNAMITE 20TH ANNIVERSARY 20,000-PAGE MEGA BUNDLE',
+        filename
+      )
+      const expectedDestinationPath = path.join(
+        comicsPath,
+        'humble',
+        'Project Superpowers',
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await mkdir(path.dirname(expectedDestinationPath), { recursive: true })
+      await writeFile(sourcePath, 'same archive')
+      await writeFile(expectedDestinationPath, 'same archive')
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'comics',
+        libraries: { comics: { path: 'Comics', layout: 'flat', extInclude: ['pdf', 'zip'] } },
+      })
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Comics Bundle: Dynamite 20th Anniversary 20,000-Page Mega Bundle',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Project Superpowers, Vol. 1',
+              downloads: [
+                {
+                  cacheKey: 'order-1:projectsuperpowers_svol1_1403556328.pdf',
+                  filename: 'projectsuperpowers_svol1_1403556328.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          configPath,
+          mediaRoot: temporaryDirectory,
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['pdf', 'zip'],
+            },
+          },
+        }),
+      })
+
+      expect(report.removedDuplicate).toBe(1)
+      expect(await readFile(expectedDestinationPath, 'utf8')).toBe('same archive')
+      expect(await pathExists(sourcePath)).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('routes single-level leftovers across configured flat libraries', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 
@@ -935,6 +1083,83 @@ describe('organizeLibrary', () => {
       expect(report.moved).toBe(1)
       expect(await readFile(destinationPath, 'utf8')).toBe('comic')
       expect(await pathExists(sourcePath)).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('reports ambiguous legacy Humble archive stem matches without moving them', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const sourcePath = path.join(
+        comicsPath,
+        'DYNAMITE 20TH ANNIVERSARY 20,000-PAGE MEGA BUNDLE',
+        'shared_vol1_cbz_1403295425.zip'
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'ambiguous archive')
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'comics',
+        libraries: { comics: { path: 'Comics', layout: 'flat', extInclude: ['pdf', 'zip'] } },
+      })
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Comics Bundle: Dynamite 20th Anniversary 20,000-Page Mega Bundle',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'First Shared',
+              downloads: [
+                {
+                  cacheKey: 'order-1:shared_svol1_1403556328.pdf',
+                  filename: 'shared_svol1_1403556328.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+            {
+              productTitle: 'Second Shared',
+              downloads: [
+                {
+                  cacheKey: 'order-1:shared_vol01_1403556328.pdf',
+                  filename: 'shared_vol01_1403556328.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          configPath,
+          mediaRoot: temporaryDirectory,
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['pdf', 'zip'],
+            },
+          },
+        }),
+      })
+
+      expect(report.ambiguous).toBe(1)
+      expect(report.movedSupplement).toBe(0)
+      expect(await readFile(sourcePath, 'utf8')).toBe('ambiguous archive')
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
