@@ -144,6 +144,11 @@ export function normalizePublisherFamilyKey(publisherFolder: string): string {
   return tokens.join(' ')
 }
 
+function isLegacyBundleLikePublisherFolder(publisherFolder: string): boolean {
+  const key = normalizeFlatPublisherKey(publisherFolder)
+  return /\b(?:bundle|megabundle)\b/.test(key)
+}
+
 export async function findExistingPublisherFolders(
   libraryPath: string,
   publisherFolder: string
@@ -155,7 +160,11 @@ export async function findExistingPublisherFolders(
     return entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
-      .filter((entryName) => normalizePublisherFamilyKey(entryName) === familyKey)
+      .filter(
+        (entryName) =>
+          normalizePublisherFamilyKey(entryName) === familyKey &&
+          !isLegacyBundleLikePublisherFolder(entryName)
+      )
       .sort((left, right) => {
         const lengthDifference = left.length - right.length
         if (lengthDifference !== 0) {

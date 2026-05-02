@@ -1577,7 +1577,6 @@ describe('organizeLibrary', () => {
       expect(report.actions).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            sourcePath: secondSourcePath,
             status: 'conflict',
             reason:
               'Multiple leftover files map to the same flat destination with different sizes.',

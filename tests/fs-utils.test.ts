@@ -72,6 +72,9 @@ describe('fs utils', () => {
     try {
       await ensureDirectory(path.join(temporaryRoot, 'IDW', 'Series', 'book.cbz'))
       await ensureDirectory(path.join(temporaryRoot, 'IDW Publishing', 'Series', 'book.cbz'))
+      await ensureDirectory(
+        path.join(temporaryRoot, 'IDW 25th Anniversary Megabundle', 'Series', 'book.cbz')
+      )
 
       await expect(findExistingPublisherFolders(temporaryRoot, 'IDW Publishing')).resolves.toEqual([
         'IDW',
