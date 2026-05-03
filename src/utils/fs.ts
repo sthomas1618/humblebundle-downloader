@@ -88,6 +88,25 @@ function inferColonPublisher(title: string): string | undefined {
   return title.match(/^([^:]+):\s+.+$/i)?.[1]
 }
 
+const PUBLISHER_SHOWCASE_PATTERNS = [
+  /\b(?:best year of|year of)\s+(.+?)\s*$/i,
+  /^humble\s+(?:books?|comics?|manga)\s+bundle:\s+(.+?)\s+\d+(?:st|nd|rd|th)?\s+anniversary\b/i,
+  /^humble\s+(?:books?|comics?|manga)\s+bundle:\s+(.+?)\s+(?:mega\s+bundle|anniversary(?:\s+bundle)?|spotlight|showcase)\s*$/i,
+  /^(.+?)\s+(?:mega\s+bundle|anniversary(?:\s+bundle)?|spotlight|showcase)\s*$/i,
+]
+
+export function inferPublisherFocusedFolder(bundleTitle: string): string | undefined {
+  const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
+  for (const pattern of PUBLISHER_SHOWCASE_PATTERNS) {
+    const publisher = title.match(pattern)?.[1]
+    const cleaned = publisher ? cleanName(publisher) : undefined
+    if (cleaned) {
+      return cleaned
+    }
+  }
+  return undefined
+}
+
 export function inferPublisherFolder(bundleTitle: string): string {
   const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
   const byMatches = [...title.matchAll(/\bby\s+(.+?)(?=\s+by\s+|\s*$)/gi)]
@@ -97,6 +116,7 @@ export function inferPublisherFolder(bundleTitle: string): string {
     title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
     (finalByPublisher?.match(/\bfrom\b/i) ? undefined : finalByPublisher) ??
     finalFromPublisher ??
+    inferPublisherFocusedFolder(title) ??
     inferColonPublisher(title) ??
     'humble'
 

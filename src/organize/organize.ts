@@ -19,11 +19,15 @@ import {
   buildAuditCandidatePaths,
   buildLocalDirectoryIndex,
   buildFlatCacheKey,
+  buildPublisherMediaScores,
   findAuditFile,
   getScanPaths,
   inferBundleFolder,
   selectRoutedDownloadCandidates,
+  shouldDownloadExtension,
   type LocalDirectoryIndex,
+  type MediaKind,
+  type MediaScore,
   type RoutedDownloadCandidate,
   type WebDownloadCandidate,
 } from '../download/downloader'
@@ -34,6 +38,7 @@ import {
   buildLibraryProductFolder,
   cleanName,
   hasSimilarTitle,
+  inferPublisherFocusedFolder,
   inferPublisherFolder,
   inferSeriesFolder,
   normalizeFlatProductKey,
@@ -138,6 +143,28 @@ function samePathExact(left: string, right: string): boolean {
 
 function getExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? ''
+}
+
+const mediaKinds: MediaKind[] = ['books', 'comics', 'manga']
+
+function emptyMediaScore(): MediaScore {
+  return {
+    books: 0,
+    comics: 0,
+    manga: 0,
+  }
+}
+
+function normalizeDuplicateFilename(filename: string): string {
+  const parsed = path.parse(filename)
+  return `${normalizeFlatProductKey(parsed.name)}.${parsed.ext.replace(/^\./, '').toLowerCase()}`
+}
+
+function duplicateIdentity(filename: string, md5?: string): string | undefined {
+  if (!md5) {
+    return undefined
+  }
+  return `${normalizeDuplicateFilename(filename)}\0${md5.toLowerCase()}`
 }
 
 function isPathInside(parent: string, candidate: string): boolean {
@@ -780,7 +807,9 @@ function flatPlannedFileKey(
 }
 
 function shouldReserveFlatPlannedFile(action: OrganizeAction): boolean {
-  return action.status !== 'missing' && action.status !== 'conflict'
+  return (
+    action.status !== 'missing' && action.status !== 'conflict' && action.status !== 'ambiguous'
+  )
 }
 
 async function findExistingFlatSeriesFolder(
@@ -843,6 +872,8 @@ async function planOrganizeAction({
   conflictDir,
   plannedMovesBySource,
   plannedDestinations,
+  canonicalDuplicateDecisions,
+  moveReason,
 }: {
   cacheKey: string
   routedCandidate: RoutedDownloadCandidate
@@ -864,6 +895,8 @@ async function planOrganizeAction({
   conflictDir?: string
   plannedMovesBySource: Map<string, string>
   plannedDestinations: Set<string>
+  canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
+  moveReason?: string
 }): Promise<OrganizeAction | undefined> {
   const { candidate, library } = routedCandidate
   const destinationLibrary = flat ? { ...library, layout: 'flat' as const } : library
@@ -963,13 +996,20 @@ async function planOrganizeAction({
     }
     action.status = 'would-remove-duplicate'
     action.reason = 'Flat destination already satisfies this duplicate source.'
+    applyCanonicalDuplicateDecision({
+      action,
+      destinationLibrary,
+      decisions: canonicalDuplicateDecisions,
+    })
     plannedDestinations.add(normalizedDestination)
     return action
   }
   if (flat && normalizedSource !== normalizedDestination && (await pathExists(destinationPath))) {
+    const crossLibrarySource = isCrossLibraryFlatSource(config, library, sourcePath)
     if (
       isLegacyBundleSource(library.path, sourcePath, bundleTitle, allBundleTitles) ||
-      isFlatPublisherFamilyAliasSource(config, sourcePath, destinationPath)
+      isFlatPublisherFamilyAliasSource(config, sourcePath, destinationPath) ||
+      crossLibrarySource
     ) {
       if (!(await sameFileSize(sourcePath, destinationPath))) {
         action.reason = 'Flat destination exists but differs in file size.'
@@ -977,7 +1017,16 @@ async function planOrganizeAction({
         return action
       }
       action.status = 'would-remove-duplicate'
-      action.reason = 'Flat destination already satisfies this duplicate source.'
+      action.reason = crossLibrarySource
+        ? 'Cross-library duplicate already satisfied by canonical destination.'
+        : 'Flat destination already satisfies this duplicate source.'
+      action.expectedLibraryPath =
+        getContainingScanLibrary(config, sourcePath)?.path ?? action.expectedLibraryPath
+      applyCanonicalDuplicateDecision({
+        action,
+        destinationLibrary,
+        decisions: canonicalDuplicateDecisions,
+      })
     } else {
       action.status = 'already-correct'
       action.reason = 'Flat destination already satisfies this file.'
@@ -1049,9 +1098,58 @@ async function planOrganizeAction({
   }
 
   action.status = 'would-move'
+  action.reason = moveReason
   plannedMovesBySource.set(normalizedSource, normalizedDestination)
   plannedDestinations.add(normalizedDestination)
   return action
+}
+
+function getLibraryKey(library: ScanLibraryConfig): string {
+  return library.name ?? library.path
+}
+
+function getLibraryMedia(library: ScanLibraryConfig): MediaKind | undefined {
+  const value = `${library.name ?? ''} ${library.path}`.toLowerCase()
+  if (/\bmanga\b/.test(value) || /(?:^|[/\\])manga(?:[/\\]|$)/.test(value)) {
+    return 'manga'
+  }
+  if (/\bcomics?\b/.test(value) || /(?:^|[/\\])comics?(?:[/\\]|$)/.test(value)) {
+    return 'comics'
+  }
+  if (/\bbooks?\b/.test(value) || /(?:^|[/\\])books?(?:[/\\]|$)/.test(value)) {
+    return 'books'
+  }
+  return undefined
+}
+
+function getSingleSelectedLibraryForAlternate(
+  selected: RoutedDownloadCandidate[],
+  candidate: WebDownloadCandidate
+): ScanLibraryConfig | undefined {
+  const libraries = new Map<string, ScanLibraryConfig>()
+  for (const routedCandidate of selected) {
+    const library = routedCandidate.library
+    if (!shouldDownloadExtension(candidate.filename, library)) {
+      continue
+    }
+    libraries.set(getLibraryKey(library), library)
+  }
+  return libraries.size === 1 ? [...libraries.values()][0] : undefined
+}
+
+function inheritSelectedProductLibrary(
+  routedCandidate: RoutedDownloadCandidate,
+  library: ScanLibraryConfig
+): RoutedDownloadCandidate {
+  return {
+    ...routedCandidate,
+    library,
+    routing: {
+      ...routedCandidate.routing,
+      libraryName: library.name,
+      libraryPath: library.path,
+    },
+  }
 }
 
 async function applyOrganizeActions(
@@ -1281,8 +1379,222 @@ function isFlatPublisherFamilyAliasSource(
   )
 }
 
+function getContainingScanLibrary(
+  config: AppConfig,
+  candidatePath: string
+): ScanLibraryConfig | undefined {
+  return config.scanLibraries
+    .filter((library) => isPathInside(path.resolve(library.path), path.resolve(candidatePath)))
+    .sort((left, right) => right.path.length - left.path.length)[0]
+}
+
+function isCrossLibraryFlatSource(
+  config: AppConfig,
+  destinationLibrary: ScanLibraryConfig,
+  sourcePath: string
+): boolean {
+  const sourceLibrary = getContainingScanLibrary(config, sourcePath)
+  return sourceLibrary !== undefined && !samePath(sourceLibrary.path, destinationLibrary.path)
+}
+
+function mediaClassificationMoveReason(
+  routedCandidate: RoutedDownloadCandidate
+): string | undefined {
+  const signals = routedCandidate.routing.mediaClassification?.signals ?? []
+  if (signals.some((signal) => signal.startsWith('comics:graphic-novel'))) {
+    return 'Graphic novel signal selected Comics.'
+  }
+  if (signals.includes('comics:one-shot:8')) {
+    return 'One-shot signal selected Comics.'
+  }
+  return undefined
+}
+
 type MetadataOrder = Awaited<ReturnType<typeof loadMetadata>>['orders'][string]
 type MetadataProduct = MetadataOrder['products'][number]
+
+type CanonicalDuplicateDecision =
+  | {
+      type: 'canonical'
+      libraryKey: string
+      media: MediaKind
+    }
+  | {
+      type: 'ambiguous'
+    }
+
+function mediaScoreFromSignal(signal: string, media: MediaKind): number {
+  const prefix = `${media}:`
+  if (!signal.startsWith(prefix)) {
+    return 0
+  }
+  const score = Number(signal.slice(prefix.length).split(':').at(-1))
+  return Number.isFinite(score) ? score : 0
+}
+
+function scoreDuplicateCanonicalEvidence(
+  routedCandidate: RoutedDownloadCandidate,
+  bundleTitle: string
+): MediaScore {
+  const scores = emptyMediaScore()
+  const classification = routedCandidate.routing.mediaClassification
+  if (classification) {
+    for (const media of mediaKinds) {
+      scores[media] += classification.scores[media]
+    }
+    for (const signal of classification.signals) {
+      if (signal.includes(':publisher-focused-tendency:')) {
+        for (const media of mediaKinds) {
+          scores[media] += mediaScoreFromSignal(signal, media)
+        }
+      }
+    }
+  }
+
+  const libraryMedia = getLibraryMedia(routedCandidate.library)
+  if (libraryMedia) {
+    scores[libraryMedia] += 1
+  }
+  if (inferPublisherFocusedFolder(bundleTitle)) {
+    const focusedPublisherScores = classification?.publisher?.scores
+    if (focusedPublisherScores) {
+      const rankedPublisherScores = mediaKinds
+        .map((media) => ({ media, score: focusedPublisherScores[media] }))
+        .sort((left, right) => right.score - left.score)
+      if (
+        rankedPublisherScores[0] &&
+        rankedPublisherScores[0].score > 0 &&
+        rankedPublisherScores[0].score > (rankedPublisherScores[1]?.score ?? 0)
+      ) {
+        scores[rankedPublisherScores[0].media] += 8
+      }
+    }
+  }
+  return scores
+}
+
+function chooseDominantMedia(scores: MediaScore): MediaKind | undefined {
+  const ranked = mediaKinds
+    .map((media) => ({ media, score: scores[media] }))
+    .sort((left, right) => right.score - left.score)
+  return ranked[0] && ranked[0].score > 0 && ranked[0].score > (ranked[1]?.score ?? 0)
+    ? ranked[0].media
+    : undefined
+}
+
+function buildCanonicalDuplicateDecisions({
+  orders,
+  config,
+  publisherMediaScores,
+}: {
+  orders: MetadataOrder[]
+  config: AppConfig
+  publisherMediaScores: Map<string, MediaScore>
+}): Map<string, CanonicalDuplicateDecision> {
+  const groups = new Map<
+    string,
+    Array<{
+      order: MetadataOrder
+      product: MetadataProduct
+      download: MetadataProduct['downloads'][number]
+    }>
+  >()
+
+  for (const order of orders) {
+    for (const product of order.products) {
+      for (const download of product.downloads) {
+        const identity = duplicateIdentity(download.filename, download.md5)
+        if (!identity) {
+          continue
+        }
+        const matches = groups.get(identity) ?? []
+        matches.push({ order, product, download })
+        groups.set(identity, matches)
+      }
+    }
+  }
+
+  const decisions = new Map<string, CanonicalDuplicateDecision>()
+  for (const [identity, matches] of groups) {
+    if (matches.length < 2) {
+      continue
+    }
+
+    const scores = emptyMediaScore()
+    const librariesByMedia = new Map<MediaKind, ScanLibraryConfig>()
+    const routedLibraryKeys = new Set<string>()
+    for (const { order, product, download } of matches) {
+      const [routedCandidate] = selectRoutedDownloadCandidates(
+        [metadataCandidate(download)],
+        config,
+        {
+          bundleTitle: order.bundleTitle,
+          productTitle: product.productTitle,
+          publisherMediaScores,
+        }
+      )
+      if (!routedCandidate) {
+        continue
+      }
+      routedLibraryKeys.add(getLibraryKey(routedCandidate.library))
+      const libraryMedia = getLibraryMedia(routedCandidate.library)
+      if (libraryMedia && !librariesByMedia.has(libraryMedia)) {
+        librariesByMedia.set(libraryMedia, routedCandidate.library)
+      }
+      const evidence = scoreDuplicateCanonicalEvidence(routedCandidate, order.bundleTitle)
+      for (const media of mediaKinds) {
+        scores[media] += evidence[media]
+      }
+    }
+
+    if (routedLibraryKeys.size < 2) {
+      continue
+    }
+
+    const dominantMedia = chooseDominantMedia(scores)
+    const canonicalLibrary = dominantMedia ? librariesByMedia.get(dominantMedia) : undefined
+    decisions.set(
+      identity,
+      dominantMedia && canonicalLibrary
+        ? {
+            type: 'canonical',
+            libraryKey: getLibraryKey(canonicalLibrary),
+            media: dominantMedia,
+          }
+        : { type: 'ambiguous' }
+    )
+  }
+
+  return decisions
+}
+
+function applyCanonicalDuplicateDecision({
+  action,
+  destinationLibrary,
+  decisions,
+}: {
+  action: OrganizeAction
+  destinationLibrary: ScanLibraryConfig
+  decisions?: Map<string, CanonicalDuplicateDecision>
+}): void {
+  if (action.status !== 'would-remove-duplicate') {
+    return
+  }
+  const identity = duplicateIdentity(action.filename, action.expectedMd5)
+  const decision = identity ? decisions?.get(identity) : undefined
+  if (!decision) {
+    return
+  }
+  if (decision.type === 'ambiguous') {
+    action.status = 'ambiguous'
+    action.reason = 'Duplicate identity has ambiguous canonical routed library.'
+    return
+  }
+  if (decision.libraryKey !== getLibraryKey(destinationLibrary)) {
+    action.status = 'already-correct'
+    action.reason = `Duplicate identity canonicalizes to ${decision.media}; preserving canonical copy.`
+  }
+}
 
 function filenameStem(filename: string): string {
   return path.basename(filename, path.extname(filename)).toLowerCase()
@@ -1584,16 +1896,133 @@ async function collectEmptyDirectories(directoryPath: string): Promise<string[]>
   return emptyDirectories
 }
 
+function removesSourceFromPlan(action: OrganizeAction): boolean {
+  return (
+    action.status === 'would-move' ||
+    action.status === 'would-move-supplement' ||
+    action.status === 'would-remove-duplicate'
+  )
+}
+
+async function planFlatEmptyFoldersFromPlannedActions({
+  config,
+  actions,
+}: {
+  config: AppConfig
+  actions: OrganizeAction[]
+}): Promise<void> {
+  const plannedRemovedSources = new Set(
+    actions
+      .filter((action) => removesSourceFromPlan(action))
+      .map((action) => action.sourcePath)
+      .filter((sourcePath): sourcePath is string => sourcePath !== undefined)
+      .map((sourcePath) => path.resolve(sourcePath).toLowerCase())
+  )
+  if (plannedRemovedSources.size === 0) {
+    return
+  }
+
+  const existingEmptyFolders = new Set(
+    actions
+      .filter(
+        (action) =>
+          action.status === 'would-remove-empty-folder' || action.status === 'removed-empty-folder'
+      )
+      .map((action) => path.resolve(action.destinationPath).toLowerCase())
+  )
+  const becomeEmptyCache = new Map<string, boolean>()
+
+  async function wouldBecomeEmpty(directoryPath: string, libraryPath: string): Promise<boolean> {
+    const normalizedDirectory = path.resolve(directoryPath).toLowerCase()
+    const cached = becomeEmptyCache.get(normalizedDirectory)
+    if (cached !== undefined) {
+      return cached
+    }
+    if (samePath(directoryPath, libraryPath)) {
+      becomeEmptyCache.set(normalizedDirectory, false)
+      return false
+    }
+
+    let entries
+    try {
+      entries = await readdir(directoryPath, { withFileTypes: true })
+    } catch {
+      becomeEmptyCache.set(normalizedDirectory, false)
+      return false
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(directoryPath, entry.name)
+      if (entry.isFile() && !plannedRemovedSources.has(path.resolve(entryPath).toLowerCase())) {
+        becomeEmptyCache.set(normalizedDirectory, false)
+        return false
+      }
+      if (entry.isDirectory() && !(await wouldBecomeEmpty(entryPath, libraryPath))) {
+        becomeEmptyCache.set(normalizedDirectory, false)
+        return false
+      }
+    }
+
+    becomeEmptyCache.set(normalizedDirectory, true)
+    return true
+  }
+
+  const candidateDirectories = new Set<string>()
+  for (const action of actions.filter((plannedAction) => removesSourceFromPlan(plannedAction))) {
+    if (!action.sourcePath) {
+      continue
+    }
+    const sourceLibrary = getContainingScanLibrary(config, action.sourcePath)
+    if (!sourceLibrary) {
+      continue
+    }
+    let current = path.dirname(action.sourcePath)
+    while (!samePath(current, sourceLibrary.path) && isPathInside(sourceLibrary.path, current)) {
+      candidateDirectories.add(current)
+      current = path.dirname(current)
+    }
+  }
+
+  const sortedCandidates = [...candidateDirectories].sort(
+    (left, right) => right.length - left.length
+  )
+  for (const directoryPath of sortedCandidates) {
+    const normalizedDirectory = path.resolve(directoryPath).toLowerCase()
+    if (existingEmptyFolders.has(normalizedDirectory)) {
+      continue
+    }
+    const sourceLibrary = getContainingScanLibrary(config, directoryPath)
+    if (!sourceLibrary || !(await wouldBecomeEmpty(directoryPath, sourceLibrary.path))) {
+      continue
+    }
+    actions.push({
+      cacheKey: `empty-planned:${normalizedDirectory}`,
+      filename: path.basename(directoryPath),
+      bundleTitle: 'Flat organize cleanup',
+      productTitle: path.basename(directoryPath),
+      expectedLibraryName: sourceLibrary.name,
+      expectedLibraryPath: sourceLibrary.path,
+      selected: false,
+      destinationPath: directoryPath,
+      status: 'would-remove-empty-folder',
+      reason: 'Flat organize action would leave this managed folder empty.',
+    })
+    existingEmptyFolders.add(normalizedDirectory)
+  }
+}
+
 function firstRoutedLibraryForProduct({
   config,
   order,
   product,
   fallbackLibrary,
+  publisherMediaScores,
 }: {
   config: AppConfig
   order: MetadataOrder
   product: MetadataProduct
   fallbackLibrary: ScanLibraryConfig
+  publisherMediaScores?: Map<string, MediaScore>
 }): ScanLibraryConfig {
   const selected = selectRoutedDownloadCandidates(
     product.downloads.map((download) => metadataCandidate(download)),
@@ -1601,6 +2030,7 @@ function firstRoutedLibraryForProduct({
     {
       bundleTitle: order.bundleTitle,
       productTitle: product.productTitle,
+      publisherMediaScores,
     }
   )
   return selected[0]?.library ?? fallbackLibrary
@@ -1617,6 +2047,8 @@ async function planSingleLevelFlatLeftovers({
   plannedDestinationRegistry,
   resolveConflicts,
   conflictDir,
+  publisherMediaScores,
+  canonicalDuplicateDecisions,
 }: {
   orders: MetadataOrder[]
   config: AppConfig
@@ -1628,6 +2060,8 @@ async function planSingleLevelFlatLeftovers({
   plannedDestinationRegistry: PlannedDestinationRegistry
   resolveConflicts: ConflictResolutionMode
   conflictDir?: string
+  publisherMediaScores?: Map<string, MediaScore>
+  canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
 }): Promise<void> {
   for (const library of config.scanLibraries) {
     let topLevelEntries
@@ -1818,8 +2252,15 @@ async function planSingleLevelFlatLeftovers({
           selectRoutedDownloadCandidates([localCandidate], config, {
             bundleTitle: order.bundleTitle,
             productTitle: product.productTitle,
+            publisherMediaScores,
           })[0]?.library ??
-          firstRoutedLibraryForProduct({ config, order, product, fallbackLibrary: library })
+          firstRoutedLibraryForProduct({
+            config,
+            order,
+            product,
+            fallbackLibrary: library,
+            publisherMediaScores,
+          })
         const productKey = normalizeFlatProductKey(product.productTitle)
         const publisherFolder =
           flatPublisherFoldersByProduct.get(productKey) ?? inferPublisherFolder(order.bundleTitle)
@@ -1859,17 +2300,27 @@ async function planSingleLevelFlatLeftovers({
           expectedMd5: matchResult.exact ? download.md5 : undefined,
           status: 'would-move-supplement',
           reason:
-            matchResult.matchKind === 'exact'
+            samePath(routedLibrary.path, library.path) && matchResult.matchKind === 'exact'
               ? 'Single-level flat leftover file will be moved by metadata filename match.'
-              : matchResult.matchKind === 'stem'
+              : samePath(routedLibrary.path, library.path) && matchResult.matchKind === 'stem'
                 ? 'Single-level flat leftover file will be moved by unique metadata stem match.'
-                : 'Single-level flat leftover file will be moved by legacy Humble archive stem match.',
+                : samePath(routedLibrary.path, library.path)
+                  ? 'Single-level flat leftover file will be moved by legacy Humble archive stem match.'
+                  : 'Metadata-matched leftover routed to classified library.',
         }
 
         if (await pathExists(destinationPath)) {
           if (await sameFileSize(sourcePath, destinationPath)) {
             action.status = 'would-remove-duplicate'
-            action.reason = 'Flat destination already satisfies this single-level leftover.'
+            action.reason =
+              routedLibrary.path === library.path
+                ? 'Flat destination already satisfies this single-level leftover.'
+                : 'Cross-library duplicate already satisfied by canonical destination.'
+            applyCanonicalDuplicateDecision({
+              action,
+              destinationLibrary: routedLibrary,
+              decisions: canonicalDuplicateDecisions,
+            })
           } else {
             action.reason = 'Flat destination exists but differs in file size.'
             await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
@@ -1902,6 +2353,176 @@ async function planSingleLevelFlatLeftovers({
   }
 }
 
+async function planManagedHumbleFlatLeftovers({
+  orders,
+  config,
+  actions,
+  flatPublisherFoldersByProduct,
+  plannedSources,
+  plannedMovesBySource,
+  plannedDestinations,
+  plannedDestinationRegistry,
+  resolveConflicts,
+  conflictDir,
+  publisherMediaScores,
+  canonicalDuplicateDecisions,
+}: {
+  orders: MetadataOrder[]
+  config: AppConfig
+  actions: OrganizeAction[]
+  flatPublisherFoldersByProduct: Map<string, string>
+  plannedSources: Set<string>
+  plannedMovesBySource: Map<string, string>
+  plannedDestinations: Set<string>
+  plannedDestinationRegistry: PlannedDestinationRegistry
+  resolveConflicts: ConflictResolutionMode
+  conflictDir?: string
+  publisherMediaScores?: Map<string, MediaScore>
+  canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
+}): Promise<void> {
+  for (const library of config.scanLibraries) {
+    const humbleFolder = path.join(library.path, 'humble')
+    if (!(await pathExists(humbleFolder))) {
+      continue
+    }
+
+    for (const sourcePath of await collectFiles(humbleFolder)) {
+      const normalizedSource = path.resolve(sourcePath).toLowerCase()
+      if (plannedSources.has(normalizedSource)) {
+        continue
+      }
+
+      const filename = path.basename(sourcePath)
+      const matchResult = findMetadataDownloadForFlatLeftover(filename, orders)
+      if (matchResult.type !== 'matched') {
+        const sourceParent = path.basename(path.dirname(sourcePath))
+        if (sourceParent.toLowerCase() === 'extras') {
+          actions.push({
+            cacheKey: `managed-flat-stale:${normalizedSource}`,
+            filename,
+            bundleTitle: 'Managed flat humble',
+            productTitle: 'Untracked managed flat stale file',
+            expectedLibraryName: library.name,
+            expectedLibraryPath: library.path,
+            selected: false,
+            sourcePath,
+            destinationPath: sourcePath,
+            status: matchResult.type,
+            reason:
+              matchResult.type === 'ambiguous'
+                ? `Managed flat stale filename matches multiple products: ${matchResult.productTitles.join(', ')}.`
+                : 'No metadata match for managed flat stale file.',
+          })
+          plannedSources.add(normalizedSource)
+        }
+        continue
+      }
+
+      const { order, product, download } = matchResult.match
+      const localCandidate = metadataCandidate({
+        ...download,
+        filename,
+        md5: matchResult.exact ? download.md5 : undefined,
+      })
+      const routedLibrary =
+        selectRoutedDownloadCandidates([localCandidate], config, {
+          bundleTitle: order.bundleTitle,
+          productTitle: product.productTitle,
+          publisherMediaScores,
+        })[0]?.library ??
+        firstRoutedLibraryForProduct({
+          config,
+          order,
+          product,
+          fallbackLibrary: library,
+          publisherMediaScores,
+        })
+      if (!shouldDownloadExtension(filename, routedLibrary)) {
+        continue
+      }
+
+      const productKey = normalizeFlatProductKey(product.productTitle)
+      const publisherFolder =
+        flatPublisherFoldersByProduct.get(productKey) ?? inferPublisherFolder(order.bundleTitle)
+      const stableSeriesFolder = await findExistingFlatSeriesFolder(
+        routedLibrary.path,
+        publisherFolder,
+        product.productTitle
+      )
+      const destinationPath = path.join(
+        buildLibraryProductFolder(
+          { ...routedLibrary, layout: 'flat' as const },
+          order.bundleTitle,
+          product.productTitle,
+          publisherFolder,
+          stableSeriesFolder
+        ),
+        filename
+      )
+      const normalizedDestination = path.resolve(destinationPath).toLowerCase()
+      if (normalizedSource === normalizedDestination) {
+        plannedSources.add(normalizedSource)
+        plannedMovesBySource.set(normalizedSource, normalizedDestination)
+        plannedDestinations.add(normalizedDestination)
+        continue
+      }
+
+      const action: OrganizeAction = {
+        cacheKey: `managed-flat-stale:${normalizedSource}`,
+        filename,
+        bundleTitle: order.bundleTitle,
+        productTitle: product.productTitle,
+        expectedLibraryName: routedLibrary.name,
+        expectedLibraryPath: library.path,
+        selected: false,
+        sourcePath,
+        destinationPath,
+        expectedMd5: matchResult.exact ? download.md5 : undefined,
+        status: 'would-move-supplement',
+        reason: 'Managed flat stale file routed to canonical library.',
+      }
+
+      if (await pathExists(destinationPath)) {
+        if (await sameFileSize(sourcePath, destinationPath)) {
+          action.status = 'would-remove-duplicate'
+          action.reason = 'Managed flat stale duplicate already satisfied by canonical destination.'
+          applyCanonicalDuplicateDecision({
+            action,
+            destinationLibrary: routedLibrary,
+            decisions: canonicalDuplicateDecisions,
+          })
+        } else {
+          action.reason = 'Flat destination exists but differs in file size.'
+          await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
+        }
+      } else if (plannedDestinations.has(normalizedDestination)) {
+        const existingAction = plannedDestinationRegistry.get(normalizedDestination)
+        if (existingAction) {
+          await resolvePlannedDestinationCollision({
+            action,
+            existingAction,
+            plannedDestinations,
+            plannedDestinationRegistry,
+            mode: resolveConflicts,
+            conflictDir,
+            orders,
+          })
+        } else {
+          action.status = 'conflict'
+          action.reason = 'Destination file is already planned for another candidate.'
+        }
+      } else {
+        plannedDestinations.add(normalizedDestination)
+        plannedDestinationRegistry.set(normalizedDestination, action)
+      }
+
+      plannedSources.add(normalizedSource)
+      plannedMovesBySource.set(normalizedSource, normalizedDestination)
+      actions.push(action)
+    }
+  }
+}
+
 async function planFlatLeftovers({
   orders,
   config,
@@ -1912,6 +2533,9 @@ async function planFlatLeftovers({
   plannedDestinations,
   resolveConflicts,
   conflictDir,
+  publisherMediaScores,
+  canonicalDuplicateDecisions,
+  planEmptyFoldersFromActions,
 }: {
   orders: MetadataOrder[]
   config: AppConfig
@@ -1922,6 +2546,9 @@ async function planFlatLeftovers({
   plannedDestinations: Set<string>
   resolveConflicts: ConflictResolutionMode
   conflictDir?: string
+  publisherMediaScores?: Map<string, MediaScore>
+  canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
+  planEmptyFoldersFromActions?: boolean
 }): Promise<void> {
   const plannedSources = new Set(
     actions
@@ -1985,16 +2612,21 @@ async function planFlatLeftovers({
                 order: effectiveOrder,
                 product: effectiveProduct,
                 fallbackLibrary: library,
+                publisherMediaScores,
               })
             : library
-          if (routedLibrary.path !== library.path) {
+          if (
+            effectiveProduct &&
+            routedLibrary.path !== library.path &&
+            !shouldDownloadExtension(filename, routedLibrary)
+          ) {
             continue
           }
           const publisherFolder =
             flatPublisherFoldersByProduct.get(normalizeFlatProductKey(productTitle)) ??
             inferPublisherFolder(effectiveOrder.bundleTitle)
           const productDestinationFolder = buildLibraryProductFolder(
-            { ...library, layout: 'flat' as const },
+            { ...routedLibrary, layout: 'flat' as const },
             effectiveOrder.bundleTitle,
             productTitle,
             publisherFolder,
@@ -2010,7 +2642,7 @@ async function planFlatLeftovers({
             filename,
             bundleTitle: effectiveOrder.bundleTitle,
             productTitle,
-            expectedLibraryName: library.name,
+            expectedLibraryName: routedLibrary.name,
             expectedLibraryPath: library.path,
             selected: false,
             sourcePath,
@@ -2024,14 +2656,26 @@ async function planFlatLeftovers({
             status: 'would-move-supplement',
             reason: effectiveProduct
               ? product
-                ? 'Supplementary local file will be moved during flat organize.'
-                : 'Unmatched product-folder file will be moved by metadata filename match.'
+                ? routedLibrary.path === library.path
+                  ? 'Supplementary local file will be moved during flat organize.'
+                  : 'Metadata-matched leftover routed to classified library.'
+                : routedLibrary.path === library.path
+                  ? 'Unmatched product-folder file will be moved by metadata filename match.'
+                  : 'Metadata-matched leftover routed to classified library.'
               : 'Unmatched local file will be moved to flat Extras.',
           }
           if (await pathExists(destinationPath)) {
             if (await sameFileSize(sourcePath, destinationPath)) {
               action.status = 'would-remove-duplicate'
-              action.reason = 'Flat destination already satisfies this supplementary duplicate.'
+              action.reason =
+                routedLibrary.path === library.path
+                  ? 'Flat destination already satisfies this supplementary duplicate.'
+                  : 'Cross-library duplicate already satisfied by canonical destination.'
+              applyCanonicalDuplicateDecision({
+                action,
+                destinationLibrary: routedLibrary,
+                decisions: canonicalDuplicateDecisions,
+              })
             } else {
               action.reason = 'Flat destination exists but differs in file size.'
               await applyConflictResolution({ action, mode: resolveConflicts, conflictDir, orders })
@@ -2064,6 +2708,21 @@ async function planFlatLeftovers({
     }
   }
 
+  await planManagedHumbleFlatLeftovers({
+    orders,
+    config,
+    actions,
+    flatPublisherFoldersByProduct,
+    plannedSources,
+    plannedMovesBySource,
+    plannedDestinations,
+    plannedDestinationRegistry,
+    resolveConflicts,
+    conflictDir,
+    publisherMediaScores,
+    canonicalDuplicateDecisions,
+  })
+
   await planSingleLevelFlatLeftovers({
     orders,
     config,
@@ -2075,6 +2734,8 @@ async function planFlatLeftovers({
     plannedDestinationRegistry,
     resolveConflicts,
     conflictDir,
+    publisherMediaScores,
+    canonicalDuplicateDecisions,
   })
 
   await planFlatPublisherAliasFolders({
@@ -2087,6 +2748,9 @@ async function planFlatLeftovers({
     resolveConflicts,
     conflictDir,
   })
+  if (planEmptyFoldersFromActions) {
+    await planFlatEmptyFoldersFromPlannedActions({ config, actions })
+  }
   await planFlatEmptyPublisherFamilyFolders({ config, actions })
   await planFlatEmptySeriesFolders({ config, actions, flatPublisherFoldersByProduct })
   await planFlatEmptyLegacyFolders({ orders, config, actions, allBundleTitles })
@@ -2602,6 +3266,10 @@ export async function organizeLibrary({
     throw new Error('--resolve-conflicts is only supported with organize --flat.')
   }
   const flatPublisherFoldersByProduct = flat ? buildPublisherFoldersByProduct(orders) : new Map()
+  const publisherMediaScores = buildPublisherMediaScores(orders)
+  const canonicalDuplicateDecisions = flat
+    ? buildCanonicalDuplicateDecisions({ orders, config, publisherMediaScores })
+    : undefined
   const allBundleTitles = orders.map((order) => order.bundleTitle)
 
   const scanPaths = getScanPaths(config)
@@ -2633,6 +3301,7 @@ export async function organizeLibrary({
         {
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
+          publisherMediaScores,
         }
       )
       selectedCandidates += selected.length
@@ -2670,6 +3339,8 @@ export async function organizeLibrary({
           conflictDir,
           plannedMovesBySource,
           plannedDestinations,
+          canonicalDuplicateDecisions,
+          moveReason: mediaClassificationMoveReason(routedCandidate),
         })
         if (action) {
           actions.push(action)
@@ -2691,12 +3362,17 @@ export async function organizeLibrary({
         const [routedCandidate] = selectRoutedDownloadCandidates([candidate], config, {
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
+          publisherMediaScores,
         })
         if (!routedCandidate) {
           continue
         }
+        const inheritedLibrary = getSingleSelectedLibraryForAlternate(selected, candidate)
+        const effectiveRoutedCandidate = inheritedLibrary
+          ? inheritSelectedProductLibrary(routedCandidate, inheritedLibrary)
+          : routedCandidate
         const flatKey = flatPlannedFileKey(
-          routedCandidate,
+          effectiveRoutedCandidate,
           product.productTitle,
           candidate.filename
         )
@@ -2705,7 +3381,7 @@ export async function organizeLibrary({
         }
         const action = await planOrganizeAction({
           cacheKey: `${order.orderId}:${candidate.filename}`,
-          routedCandidate,
+          routedCandidate: effectiveRoutedCandidate,
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
           selected: false,
@@ -2726,6 +3402,10 @@ export async function organizeLibrary({
           conflictDir,
           plannedMovesBySource,
           plannedDestinations,
+          canonicalDuplicateDecisions,
+          moveReason: inheritedLibrary
+            ? 'Alternate format follows the selected product library.'
+            : mediaClassificationMoveReason(effectiveRoutedCandidate),
         })
         if (action) {
           actions.push(action)
@@ -2749,6 +3429,9 @@ export async function organizeLibrary({
       plannedDestinations,
       resolveConflicts: effectiveResolveConflicts,
       conflictDir,
+      publisherMediaScores,
+      canonicalDuplicateDecisions,
+      planEmptyFoldersFromActions: !apply,
     })
   }
 
