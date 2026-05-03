@@ -940,9 +940,10 @@ function routeDownloadCandidate(
   const rankableMatches =
     mediaClassification.selected === undefined
       ? [...libraryMatches.values()]
-      : [...libraryMatches.values()].filter(
-          (match) => getLibraryMedia(match.library) === mediaClassification.selected
-        )
+      : [...libraryMatches.values()].filter((match) => {
+          const libraryMedia = getLibraryMedia(match.library)
+          return libraryMedia === undefined || libraryMedia === mediaClassification.selected
+        })
   const rankedSource = rankableMatches.length > 0 ? rankableMatches : [...libraryMatches.values()]
   const ranked = rankedSource.sort((left, right) => {
     if (right.tier !== left.tier) {

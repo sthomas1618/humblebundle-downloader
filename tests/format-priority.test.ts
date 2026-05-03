@@ -349,6 +349,62 @@ describe('heuristic media routing', () => {
     expect(selected?.library.name).toBe('manga')
   })
 
+  it('keeps explicit custom-library routes eligible when media classification selects a media library', () => {
+    const config = resolveConfig({
+      defaultLibrary: 'books',
+      routes: [
+        {
+          id: 'custom-archive-editions',
+          library: 'archive',
+          productTitlePatterns: [String.raw`\barchive edition\b`],
+        },
+        {
+          id: 'comic-bundles',
+          library: 'comics',
+          bundleTitlePatterns: [String.raw`\bcomics?\s+bundle\b`],
+        },
+        {
+          id: 'ebook-formats',
+          library: 'books',
+          extensions: ['epub', 'mobi'],
+        },
+      ],
+      libraries: {
+        books: {
+          path: 'Books',
+          formatPriority: ['epub', 'pdf', 'mobi'],
+          extInclude: ['epub', 'pdf', 'mobi'],
+        },
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz', 'pdf', 'epub', 'mobi'],
+          extInclude: ['cbz', 'pdf', 'epub', 'mobi'],
+        },
+        archive: {
+          path: 'Archive',
+          formatPriority: ['epub', 'pdf'],
+          extInclude: ['epub', 'pdf'],
+        },
+      },
+    })
+    const [selected] = selectRoutedDownloadCandidates(
+      [
+        {
+          filename: 'specialarchiveedition.epub',
+          platform: 'ebook',
+          url: 'https://example.invalid/specialarchiveedition.epub',
+        },
+      ],
+      config,
+      {
+        bundleTitle: 'Humble Comics Bundle: Example Stories',
+        productTitle: 'Special Archive Edition',
+      }
+    )
+
+    expect(selected?.library.name).toBe('archive')
+  })
+
   it('uses inferred publisher tendency as a weak non-hardcoded tie-breaker', () => {
     const publisherMediaScores = buildPublisherMediaScores([
       {
