@@ -92,10 +92,11 @@ export function inferPublisherFolder(bundleTitle: string): string {
   const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
   const byMatches = [...title.matchAll(/\bby\s+(.+?)(?=\s+by\s+|\s*$)/gi)]
   const finalByPublisher = byMatches.at(-1)?.[1]
+  const finalFromPublisher = title.match(/\bfrom\s+(.+?)\s*$/i)?.[1]
   const inferredPublisher =
     title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
-    title.match(/\bfrom\s+(.+?)\s*$/i)?.[1] ??
-    finalByPublisher ??
+    (finalByPublisher?.match(/\bfrom\b/i) ? undefined : finalByPublisher) ??
+    finalFromPublisher ??
     inferColonPublisher(title) ??
     'humble'
 

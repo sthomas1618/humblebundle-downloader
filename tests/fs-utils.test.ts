@@ -47,6 +47,9 @@ describe('fs utils', () => {
         'Humble Book Bundle: MONOGATARI - Supernatural Light Novels by NISIOISIN from Kodansha'
       )
     ).toBe('Kodansha')
+    expect(inferPublisherFolder('Humble Book Bundle: Survival From the Margins by Microcosm')).toBe(
+      'Microcosm'
+    )
     expect(inferPublisherFolder('Koike by Dark Horse')).toBe('Dark Horse')
     expect(inferPublisherFolder('Bushcraft & Homestead Handbook Series by Adams Media')).toBe(
       'Adams Media'

@@ -1359,7 +1359,9 @@ type FlatLeftoverMatchResult =
 const suspiciousAllCapsFolderPattern = /^[\d !#&'()+,.:;A-Z[\]_-]+$/
 
 function normalizedFilenameStem(filename: string): string {
-  return filenameStem(filename).replace(/\s+\(\d+\)$/, '')
+  return filenameStem(filename)
+    .replace(/\s+\(\d+\)$/, '')
+    .replace(/[\s_-]+v\d+$/i, '')
 }
 
 function legacyHumbleArchiveStem(filename: string): string {
@@ -1473,6 +1475,22 @@ function selectMetadataDownloadMatch(
     exact: matchKind === 'exact',
     matchKind,
   }
+}
+
+function inferUntrackedFlatLeftoverPublisher(folderName: string): string {
+  const inferredPublisher = inferPublisherFolder(folderName)
+  return inferredPublisher === 'humble' ? cleanName(folderName) || 'humble' : inferredPublisher
+}
+
+function findMetadataDownloadForOrderFlatLeftover(
+  filename: string,
+  order: MetadataOrder,
+  orders: MetadataOrder[]
+): FlatLeftoverMatchResult {
+  const orderMatch = findMetadataDownloadForFlatLeftover(filename, [order])
+  return orderMatch.type === 'matched'
+    ? orderMatch
+    : findMetadataDownloadForFlatLeftover(filename, orders)
 }
 
 function metadataFolderKey(title: string): string {
@@ -1671,6 +1689,76 @@ async function planSingleLevelFlatLeftovers({
         const filename = path.basename(sourcePath)
         const matchResult = findMetadataDownloadForFlatLeftover(filename, orders)
         if (matchResult.type !== 'matched') {
+          if (matchResult.type === 'untracked') {
+            const publisherFolder = inferUntrackedFlatLeftoverPublisher(topLevelEntry.name)
+            const destinationPath = path.join(
+              buildLibraryProductFolder(
+                { ...library, layout: 'flat' as const },
+                topLevelEntry.name,
+                'Extras',
+                publisherFolder,
+                'Extras'
+              ),
+              filename
+            )
+            const normalizedDestination = path.resolve(destinationPath).toLowerCase()
+            if (normalizedSource === normalizedDestination) {
+              plannedSources.add(normalizedSource)
+              plannedMovesBySource.set(normalizedSource, normalizedDestination)
+              plannedDestinations.add(normalizedDestination)
+              continue
+            }
+            const action: OrganizeAction = {
+              cacheKey: `flat-leftover:${normalizedSource}`,
+              filename,
+              bundleTitle: topLevelEntry.name,
+              productTitle: 'Extras',
+              expectedLibraryName: library.name,
+              expectedLibraryPath: library.path,
+              selected: false,
+              sourcePath,
+              destinationPath,
+              status: 'would-move-supplement',
+              reason: 'Untracked flat leftover file will be moved to flat Extras.',
+            }
+            if (await pathExists(destinationPath)) {
+              if (await sameFileSize(sourcePath, destinationPath)) {
+                action.status = 'would-remove-duplicate'
+                action.reason = 'Flat Extras already satisfies this untracked leftover.'
+              } else {
+                action.reason = 'Flat Extras destination exists but differs in file size.'
+                await applyConflictResolution({
+                  action,
+                  mode: resolveConflicts,
+                  conflictDir,
+                  orders,
+                })
+              }
+            } else if (plannedDestinations.has(normalizedDestination)) {
+              const existingAction = plannedDestinationRegistry.get(normalizedDestination)
+              if (existingAction) {
+                await resolvePlannedDestinationCollision({
+                  action,
+                  existingAction,
+                  plannedDestinations,
+                  plannedDestinationRegistry,
+                  mode: resolveConflicts,
+                  conflictDir,
+                  orders,
+                })
+              } else {
+                action.status = 'conflict'
+                action.reason = 'Destination file is already planned for another candidate.'
+              }
+            } else {
+              plannedDestinations.add(normalizedDestination)
+              plannedDestinationRegistry.set(normalizedDestination, action)
+            }
+            plannedSources.add(normalizedSource)
+            plannedMovesBySource.set(normalizedSource, normalizedDestination)
+            actions.push(action)
+            continue
+          }
           actions.push({
             cacheKey: `flat-leftover:${normalizedSource}`,
             filename,
@@ -1849,29 +1937,43 @@ async function planFlatLeftovers({
       for (const productEntry of productEntries.filter((entry) => entry.isDirectory())) {
         const productFolder = path.join(bundleFolder, productEntry.name)
         const product = findMetadataProductForFolder(productEntry.name, order.products)
-        const productTitle = product?.productTitle ?? 'Extras'
-        const routedLibrary = product
-          ? firstRoutedLibraryForProduct({ config, order, product, fallbackLibrary: library })
-          : library
-        if (routedLibrary.path !== library.path) {
-          continue
-        }
-        const publisherFolder =
-          flatPublisherFoldersByProduct.get(normalizeFlatProductKey(productTitle)) ??
-          inferPublisherFolder(order.bundleTitle)
-        const productDestinationFolder = buildLibraryProductFolder(
-          { ...library, layout: 'flat' as const },
-          order.bundleTitle,
-          productTitle,
-          publisherFolder,
-          product ? undefined : 'Extras'
-        )
         for (const sourcePath of await collectFiles(productFolder)) {
           const normalizedSource = path.resolve(sourcePath).toLowerCase()
           if (plannedSources.has(normalizedSource)) {
             continue
           }
           const relativeSource = path.relative(productFolder, sourcePath)
+          const filename = path.basename(sourcePath)
+          const recoveredMatch = product
+            ? undefined
+            : findMetadataDownloadForOrderFlatLeftover(filename, order, orders)
+          const recoveredProduct =
+            recoveredMatch?.type === 'matched' ? recoveredMatch.match.product : undefined
+          const effectiveProduct = product ?? recoveredProduct
+          const effectiveOrder =
+            recoveredMatch?.type === 'matched' ? recoveredMatch.match.order : order
+          const productTitle = effectiveProduct?.productTitle ?? 'Extras'
+          const routedLibrary = effectiveProduct
+            ? firstRoutedLibraryForProduct({
+                config,
+                order: effectiveOrder,
+                product: effectiveProduct,
+                fallbackLibrary: library,
+              })
+            : library
+          if (routedLibrary.path !== library.path) {
+            continue
+          }
+          const publisherFolder =
+            flatPublisherFoldersByProduct.get(normalizeFlatProductKey(productTitle)) ??
+            inferPublisherFolder(effectiveOrder.bundleTitle)
+          const productDestinationFolder = buildLibraryProductFolder(
+            { ...library, layout: 'flat' as const },
+            effectiveOrder.bundleTitle,
+            productTitle,
+            publisherFolder,
+            effectiveProduct ? undefined : 'Extras'
+          )
           const destinationPath = path.join(productDestinationFolder, relativeSource)
           const normalizedDestination = path.resolve(destinationPath).toLowerCase()
           if (normalizedSource === normalizedDestination) {
@@ -1879,21 +1981,25 @@ async function planFlatLeftovers({
           }
           const action: OrganizeAction = {
             cacheKey: `local:${normalizedSource}`,
-            filename: path.basename(sourcePath),
-            bundleTitle: order.bundleTitle,
+            filename,
+            bundleTitle: effectiveOrder.bundleTitle,
             productTitle,
             expectedLibraryName: library.name,
             expectedLibraryPath: library.path,
             selected: false,
             sourcePath,
             destinationPath,
-            expectedMd5: product?.downloads.find(
-              (download) =>
-                download.filename.toLowerCase() === path.basename(sourcePath).toLowerCase()
-            )?.md5,
+            expectedMd5:
+              recoveredMatch?.type === 'matched' && recoveredMatch.exact
+                ? recoveredMatch.match.download.md5
+                : effectiveProduct?.downloads.find(
+                    (download) => download.filename.toLowerCase() === filename.toLowerCase()
+                  )?.md5,
             status: 'would-move-supplement',
-            reason: product
-              ? 'Supplementary local file will be moved during flat organize.'
+            reason: effectiveProduct
+              ? product
+                ? 'Supplementary local file will be moved during flat organize.'
+                : 'Unmatched product-folder file will be moved by metadata filename match.'
               : 'Unmatched local file will be moved to flat Extras.',
           }
           if (await pathExists(destinationPath)) {
