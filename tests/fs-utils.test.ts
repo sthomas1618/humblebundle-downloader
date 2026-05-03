@@ -12,6 +12,7 @@ import {
   ensureDirectory,
   findExistingPublisherFolders,
   hasSimilarTitle,
+  inferPublisherFocusedFolder,
   inferPublisherFolder,
   inferSeriesFolder,
   normalizePublisherFamilyKey,
@@ -47,12 +48,18 @@ describe('fs utils', () => {
         'Humble Book Bundle: MONOGATARI - Supernatural Light Novels by NISIOISIN from Kodansha'
       )
     ).toBe('Kodansha')
+    expect(inferPublisherFolder('Humble Book Bundle: Survival From the Margins by Microcosm')).toBe(
+      'Microcosm'
+    )
     expect(inferPublisherFolder('Koike by Dark Horse')).toBe('Dark Horse')
     expect(inferPublisherFolder('Bushcraft & Homestead Handbook Series by Adams Media')).toBe(
       'Adams Media'
     )
     expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor Francis')
     expect(inferPublisherFolder('Humble Book Bundle: Python and Security')).toBe('humble')
+    expect(inferPublisherFolder('Humble Comic Bundle: The Best Year of BOOM! Studios')).toBe(
+      'BOOM Studios'
+    )
   })
 
   it('groups publisher variants by normalized family suffixes', () => {
@@ -64,6 +71,18 @@ describe('fs utils', () => {
     expect(normalizePublisherFamilyKey('IDW 25th Anniversary Megabundle')).toBe(
       normalizePublisherFamilyKey('IDW')
     )
+    expect(normalizePublisherFamilyKey('BOOM! Studios')).toBe(normalizePublisherFamilyKey('BOOM'))
+    expect(normalizePublisherFamilyKey('BOOM Studios')).toBe(normalizePublisherFamilyKey('BOOM!'))
+  })
+
+  it('infers publisher-focused bundle phrases without named publisher rules', () => {
+    expect(inferPublisherFocusedFolder('Humble Comic Bundle: The Best Year of BOOM! Studios')).toBe(
+      'BOOM Studios'
+    )
+    expect(inferPublisherFocusedFolder('Humble Comics Bundle: Example Press Mega Bundle')).toBe(
+      'Example Press'
+    )
+    expect(inferPublisherFocusedFolder('Humble Fight for Racial Justice Bundle')).toBeUndefined()
   })
 
   it('prefers existing publisher family folders without named aliases', async () => {

@@ -12,9 +12,11 @@ import {
   buildTroveFolder,
   cleanName,
   findExistingPublisherFolders,
+  inferPublisherFocusedFolder,
   inferPublisherFolder,
   inferSeriesFolder,
   normalizeFlatProductKey,
+  normalizePublisherFamilyKey,
   resolvePublisherFolder,
   hasSimilarTitle,
 } from '../utils/fs'
@@ -32,6 +34,7 @@ import {
   saveMetadata,
   upsertOrderMetadata,
   type MetadataData,
+  type MetadataOrder,
 } from './metadata'
 
 /**
@@ -125,6 +128,20 @@ export type DownloadInspection = {
 
 export type RouteSignal = 'extension' | 'platform' | 'bundleTitle' | 'productTitle' | 'filename'
 
+export type MediaKind = 'books' | 'comics' | 'manga'
+
+export type MediaScore = Record<MediaKind, number>
+
+export type MediaClassification = {
+  selected?: MediaKind
+  scores: MediaScore
+  signals: string[]
+  publisher?: {
+    folder: string
+    scores: MediaScore
+  }
+}
+
 export type CandidateRouteMatch = {
   routeId: string
   library: string
@@ -142,6 +159,7 @@ export type CandidateRoutingDecision = {
   fallback: boolean
   ambiguous: boolean
   matchedRoutes: CandidateRouteMatch[]
+  mediaClassification?: MediaClassification
 }
 
 export type WebDownloadCandidate = {
@@ -459,6 +477,238 @@ function getConfiguredLibrary(config: AppConfig, name: string): ScanLibraryConfi
 type CandidateRouteContext = {
   bundleTitle: string
   productTitle: string
+  publisherMediaScores?: Map<string, MediaScore>
+}
+
+const mediaKinds: MediaKind[] = ['books', 'comics', 'manga']
+
+function emptyMediaScore(): MediaScore {
+  return {
+    books: 0,
+    comics: 0,
+    manga: 0,
+  }
+}
+
+function addMediaScore(
+  scores: MediaScore,
+  signals: string[],
+  media: MediaKind,
+  value: number,
+  signal: string
+): void {
+  scores[media] += value
+  signals.push(`${media}:${signal}:${value}`)
+}
+
+function textMatches(value: string, pattern: RegExp): boolean {
+  return pattern.test(value)
+}
+
+function normalizedRouteText(value: string): string {
+  return value.replaceAll(/[._-]+/g, ' ').toLowerCase()
+}
+
+function isInstructionalArtText(value: string): boolean {
+  return textMatches(
+    value,
+    /\b(?:drawing|how to draw|art of drawing|art class|cartooning|animation|characters?|guide|workshop|lab)\b/i
+  )
+}
+
+export function publisherMediaScoreKey(bundleTitle: string): string {
+  return normalizePublisherFamilyKey(
+    inferPublisherFocusedFolder(bundleTitle) ?? inferPublisherFolder(bundleTitle)
+  )
+}
+
+function classifyMedia(
+  candidate: WebDownloadCandidate,
+  context: CandidateRouteContext
+): MediaClassification {
+  const scores = emptyMediaScore()
+  const signals: string[] = []
+  const bundleTitle = normalizedRouteText(context.bundleTitle)
+  const productTitle = normalizedRouteText(context.productTitle)
+  const filename = normalizedRouteText(candidate.filename)
+  const combinedProductText = `${productTitle} ${filename}`
+  const extension = getExtension(candidate.filename)
+  const publisherFolder = inferPublisherFolder(context.bundleTitle)
+  const publisherScoreKey = publisherMediaScoreKey(context.bundleTitle)
+
+  if (/\bmanga\s+bundle\b/i.test(bundleTitle)) {
+    addMediaScore(scores, signals, 'manga', 16, 'manga-bundle')
+  }
+  if (/\bcomics?\s+bundle\b/i.test(bundleTitle)) {
+    addMediaScore(scores, signals, 'comics', 12, 'comic-bundle')
+  }
+  if (/\bgames?\s+(?:&|and)\s+comics?\s+crossover\s+collection\b/i.test(bundleTitle)) {
+    addMediaScore(scores, signals, 'comics', 12, 'games-comics-crossover')
+  }
+  if (/\b(?:book bundle|ebooks?|e-books?|novels?|writing bundle|nanowrimo)\b/i.test(bundleTitle)) {
+    addMediaScore(scores, signals, 'books', 12, 'book-bundle')
+  }
+
+  const instructionalArt = isInstructionalArtText(combinedProductText)
+  if (instructionalArt) {
+    addMediaScore(scores, signals, 'books', 8, 'instructional-art')
+  }
+
+  if (extension === 'cbz') {
+    addMediaScore(scores, signals, 'comics', 10, 'cbz-format')
+  } else if (extension === 'epub' || extension === 'mobi') {
+    addMediaScore(scores, signals, 'books', 1, `${extension}-format`)
+  }
+
+  if (/\b(?:issues?|vol(?:ume)?|chapters?|omnibus|collection)\b/i.test(combinedProductText)) {
+    addMediaScore(scores, signals, 'comics', 5, 'serialized-comic-work')
+  }
+  if (/\bone[\s-]?shot\b/i.test(combinedProductText)) {
+    addMediaScore(scores, signals, 'comics', 8, 'one-shot')
+  }
+  if (/\bgraphic novel (?:adaptation|adaption)\b/i.test(combinedProductText)) {
+    addMediaScore(scores, signals, 'comics', 16, 'graphic-novel-adaptation')
+  } else if (/\bgraphic novel\b/i.test(combinedProductText)) {
+    addMediaScore(scores, signals, 'comics', 14, 'graphic-novel')
+  }
+  if (/\bcomic book\b/i.test(combinedProductText)) {
+    addMediaScore(
+      scores,
+      signals,
+      instructionalArt ? 'books' : 'comics',
+      instructionalArt ? 4 : 5,
+      instructionalArt ? 'instructional-comic-book' : 'comic-book'
+    )
+  } else if (/\bcomics?\b/i.test(combinedProductText)) {
+    addMediaScore(
+      scores,
+      signals,
+      instructionalArt ? 'books' : 'comics',
+      instructionalArt ? 3 : 4,
+      instructionalArt ? 'instructional-comics' : 'comic-product'
+    )
+  }
+  if (/\bmanga\b/i.test(combinedProductText)) {
+    addMediaScore(
+      scores,
+      signals,
+      instructionalArt ? 'books' : 'manga',
+      instructionalArt ? 3 : 16,
+      instructionalArt ? 'instructional-manga' : 'manga-product'
+    )
+  }
+  if (/\b(?:cookbook|guide|reference|manual|handbook)\b/i.test(combinedProductText)) {
+    addMediaScore(scores, signals, 'books', 16, 'reference-book-product')
+  }
+  if (/\b(?:book|guide|author|reference)\b/i.test(combinedProductText)) {
+    addMediaScore(scores, signals, 'books', 2, 'bookish-product')
+  } else if (
+    /\bnovel\b/i.test(combinedProductText) &&
+    !/\bgraphic novel\b/i.test(combinedProductText)
+  ) {
+    addMediaScore(scores, signals, 'books', 2, 'bookish-product')
+  }
+  if (/\bebook\b/i.test(filename)) {
+    addMediaScore(scores, signals, 'books', 1, 'ebook-filename-format')
+  }
+
+  const publisherScores = context.publisherMediaScores?.get(publisherScoreKey)
+  if (publisherScores) {
+    const rankedPublisherScores = mediaKinds
+      .map((media) => ({ media, score: publisherScores[media] }))
+      .sort((left, right) => right.score - left.score)
+    const dominantPublisherMedia =
+      rankedPublisherScores[0] &&
+      rankedPublisherScores[0].score > 0 &&
+      rankedPublisherScores[0].score > (rankedPublisherScores[1]?.score ?? 0)
+        ? rankedPublisherScores[0].media
+        : undefined
+    if (dominantPublisherMedia) {
+      const publisherFocused = inferPublisherFocusedFolder(context.bundleTitle) !== undefined
+      addMediaScore(
+        scores,
+        signals,
+        dominantPublisherMedia,
+        publisherFocused ? 8 : 2,
+        publisherFocused ? 'publisher-focused-tendency' : 'publisher-tendency'
+      )
+    }
+  }
+
+  const ranked = mediaKinds
+    .map((media) => ({ media, score: scores[media] }))
+    .sort((left, right) => right.score - left.score)
+  const selected =
+    ranked[0] && ranked[0].score > 0 && ranked[0].score > (ranked[1]?.score ?? 0)
+      ? ranked[0].media
+      : undefined
+
+  return {
+    selected,
+    scores,
+    signals,
+    publisher: publisherScores
+      ? {
+          folder: publisherFolder,
+          scores: publisherScores,
+        }
+      : undefined,
+  }
+}
+
+function scoreMetadataDownloadMedia(
+  order: Pick<MetadataOrder, 'bundleTitle' | 'products'>
+): MediaScore {
+  const scores = emptyMediaScore()
+  for (const product of order.products) {
+    for (const download of product.downloads) {
+      const classification = classifyMedia(
+        {
+          filename: download.filename,
+          platform: download.platform,
+          url: '',
+        },
+        {
+          bundleTitle: order.bundleTitle,
+          productTitle: product.productTitle,
+        }
+      )
+      for (const media of mediaKinds) {
+        scores[media] += classification.scores[media]
+      }
+    }
+  }
+  return scores
+}
+
+export function buildPublisherMediaScores(
+  orders: Array<Pick<MetadataOrder, 'bundleTitle' | 'products'>>
+): Map<string, MediaScore> {
+  const scoresByPublisher = new Map<string, MediaScore>()
+  for (const order of orders) {
+    const publisherKey = publisherMediaScoreKey(order.bundleTitle)
+    const scores = scoresByPublisher.get(publisherKey) ?? emptyMediaScore()
+    const orderScores = scoreMetadataDownloadMedia(order)
+    for (const media of mediaKinds) {
+      scores[media] += orderScores[media]
+    }
+    scoresByPublisher.set(publisherKey, scores)
+  }
+  return scoresByPublisher
+}
+
+function getLibraryMedia(library: ScanLibraryConfig): MediaKind | undefined {
+  const value = `${library.name ?? ''} ${library.path}`.toLowerCase()
+  if (/\bmanga\b/.test(value) || /(?:^|[/\\])manga(?:[/\\]|$)/.test(value)) {
+    return 'manga'
+  }
+  if (/\bcomics?\b/.test(value) || /(?:^|[/\\])comics?(?:[/\\]|$)/.test(value)) {
+    return 'comics'
+  }
+  if (/\bbooks?\b/.test(value) || /(?:^|[/\\])books?(?:[/\\]|$)/.test(value)) {
+    return 'books'
+  }
+  return undefined
 }
 
 const routeSignalTiers: Record<RouteSignal, number> = {
@@ -533,12 +783,41 @@ function getRouteMatchSpecificity(signals: RouteSignal[]): number {
   return Math.max(...signals.map((signal) => routeSignalSpecificity[signal]))
 }
 
+function mediaScoreFromSignal(signal: string, media: MediaKind): number {
+  const prefix = `${media}:`
+  if (!signal.startsWith(prefix)) {
+    return 0
+  }
+  const score = Number(signal.slice(prefix.length).split(':').at(-1))
+  return Number.isFinite(score) ? score : 0
+}
+
+function hasStrongClassifierRoutingSignal(classification: MediaClassification): boolean {
+  const selected = classification.selected
+  if (!selected) {
+    return false
+  }
+  return classification.signals.some((signal) => {
+    if (
+      signal.includes(':publisher-tendency:') ||
+      signal.includes('-bundle:') ||
+      signal.includes(':games-comics-crossover:') ||
+      signal.includes('-format:') ||
+      signal.includes(':ebook-filename-format:')
+    ) {
+      return false
+    }
+    return mediaScoreFromSignal(signal, selected) >= 8
+  })
+}
+
 function routeDownloadCandidate(
   candidate: WebDownloadCandidate,
   context: CandidateRouteContext,
   config: AppConfig
 ): { library: ScanLibraryConfig; routing: CandidateRoutingDecision } | undefined {
   const activeLibrary = getActiveDestinationLibrary(config)
+  const mediaClassification = classifyMedia(candidate, context)
   const libraryMatches = new Map<
     string,
     {
@@ -603,6 +882,38 @@ function routeDownloadCandidate(
     }
   }
 
+  if (
+    mediaClassification.selected &&
+    hasStrongClassifierRoutingSignal(mediaClassification) &&
+    ![...libraryMatches.values()].some(
+      (match) => getLibraryMedia(match.library) === mediaClassification.selected
+    )
+  ) {
+    const classifiedLibrary = config.scanLibraries.find(
+      (library) =>
+        getLibraryMedia(library) === mediaClassification.selected &&
+        shouldDownloadPlatform(candidate.platform, library) &&
+        shouldDownloadExtension(candidate.filename, library)
+    )
+    if (classifiedLibrary) {
+      libraryMatches.set(classifiedLibrary.name ?? classifiedLibrary.path, {
+        library: classifiedLibrary,
+        tier: 2,
+        specificity: 5,
+        firstRouteIndex: -1,
+        matches: [
+          {
+            routeId: 'media-classification',
+            library: classifiedLibrary.name ?? classifiedLibrary.path,
+            tier: 2,
+            specificity: 5,
+            signals: [],
+          },
+        ],
+      })
+    }
+  }
+
   if (libraryMatches.size === 0) {
     if (
       !shouldDownloadPlatform(candidate.platform, config) ||
@@ -621,11 +932,20 @@ function routeDownloadCandidate(
         fallback: true,
         ambiguous: false,
         matchedRoutes: [],
+        mediaClassification,
       },
     }
   }
 
-  const ranked = [...libraryMatches.values()].sort((left, right) => {
+  const rankableMatches =
+    mediaClassification.selected === undefined
+      ? [...libraryMatches.values()]
+      : [...libraryMatches.values()].filter((match) => {
+          const libraryMedia = getLibraryMedia(match.library)
+          return libraryMedia === undefined || libraryMedia === mediaClassification.selected
+        })
+  const rankedSource = rankableMatches.length > 0 ? rankableMatches : [...libraryMatches.values()]
+  const ranked = rankedSource.sort((left, right) => {
     if (right.tier !== left.tier) {
       return right.tier - left.tier
     }
@@ -660,6 +980,7 @@ function routeDownloadCandidate(
       fallback: false,
       ambiguous,
       matchedRoutes: winner.matches,
+      mediaClassification,
     },
   }
 }
@@ -983,6 +1304,9 @@ export async function downloadLibrary({
   const metadataPath = metadata
     ? resolveMetadataPath(config.libraryPath, config.metadataPath)
     : undefined
+  const publisherMediaScores = metadata
+    ? buildPublisherMediaScores(Object.values(metadata.orders))
+    : undefined
   const scanPaths = getScanPaths(config)
   emitProgress(onProgress, 'Indexing local files...')
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
@@ -1141,6 +1465,7 @@ export async function downloadLibrary({
         const selectedCandidates = selectRoutedDownloadCandidates(webCandidates, config, {
           bundleTitle,
           productTitle: product.human_name,
+          publisherMediaScores,
         })
         for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
@@ -1366,6 +1691,12 @@ export async function inspectDownloadState({
   const scanPaths = getScanPaths(config)
   emitProgress(onProgress, 'Indexing local files...')
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
+  const metadata: MetadataData | undefined = config.troveOnly
+    ? undefined
+    : await loadMetadata(config.libraryPath, config.metadataPath)
+  const publisherMediaScores = metadata
+    ? buildPublisherMediaScores(Object.values(metadata.orders))
+    : undefined
   emitProgress(onProgress, 'Loading Humble library metadata...')
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -1421,6 +1752,7 @@ export async function inspectDownloadState({
       const selectedCandidates = selectRoutedDownloadCandidates(webCandidates, config, {
         bundleTitle,
         productTitle: product.human_name,
+        publisherMediaScores,
       })
       for (const { candidate, library, routing } of selectedCandidates) {
         const cacheKey = `${orderId}:${candidate.filename}`
@@ -1906,6 +2238,9 @@ export async function auditLibrary({
   const metadata: MetadataData | undefined = config.troveOnly
     ? undefined
     : await loadMetadata(config.libraryPath, config.metadataPath)
+  const publisherMediaScores = metadata
+    ? buildPublisherMediaScores(Object.values(metadata.orders))
+    : undefined
   emitProgress(onProgress, 'Indexing local files...')
   const scanPaths = getScanPaths(config)
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
@@ -2111,6 +2446,7 @@ export async function auditLibrary({
         const selectedCandidates = selectRoutedDownloadCandidates(webCandidates, config, {
           bundleTitle,
           productTitle: product.human_name,
+          publisherMediaScores,
         })
         summary.selectedCandidates += selectedCandidates.length
         for (const { candidate, library, routing } of selectedCandidates) {
