@@ -1477,8 +1477,8 @@ function selectMetadataDownloadMatch(
   }
 }
 
-function inferUntrackedFlatLeftoverPublisher(folderName: string): string {
-  const inferredPublisher = inferPublisherFolder(folderName)
+function inferUntrackedFlatLeftoverPublisher(folderName: string, order?: MetadataOrder): string {
+  const inferredPublisher = inferPublisherFolder(order?.bundleTitle ?? folderName)
   return inferredPublisher === 'humble' ? cleanName(folderName) || 'humble' : inferredPublisher
 }
 
@@ -1680,6 +1680,11 @@ async function planSingleLevelFlatLeftovers({
       ) {
         continue
       }
+      const topLevelOrder = findMetadataOrderForFolder(
+        topLevelEntry.name,
+        orders,
+        orders.map((order) => order.bundleTitle)
+      )
 
       for (const sourcePath of await collectFiles(topLevelPath)) {
         const normalizedSource = path.resolve(sourcePath).toLowerCase()
@@ -1690,7 +1695,28 @@ async function planSingleLevelFlatLeftovers({
         const matchResult = findMetadataDownloadForFlatLeftover(filename, orders)
         if (matchResult.type !== 'matched') {
           if (matchResult.type === 'untracked') {
-            const publisherFolder = inferUntrackedFlatLeftoverPublisher(topLevelEntry.name)
+            const inferredPublisher = inferPublisherFolder(topLevelEntry.name)
+            if (!topLevelOrder && inferredPublisher === 'humble') {
+              actions.push({
+                cacheKey: `flat-leftover:${normalizedSource}`,
+                filename,
+                bundleTitle: topLevelEntry.name,
+                productTitle: 'Untracked flat leftover',
+                expectedLibraryName: library.name,
+                expectedLibraryPath: library.path,
+                selected: false,
+                sourcePath,
+                destinationPath: sourcePath,
+                status: 'untracked',
+                reason: 'No metadata match for flat leftover file.',
+              })
+              plannedSources.add(normalizedSource)
+              continue
+            }
+            const publisherFolder = inferUntrackedFlatLeftoverPublisher(
+              topLevelEntry.name,
+              topLevelOrder
+            )
             const destinationPath = path.join(
               buildLibraryProductFolder(
                 { ...library, layout: 'flat' as const },
@@ -2062,6 +2088,7 @@ async function planFlatLeftovers({
     conflictDir,
   })
   await planFlatEmptyPublisherFamilyFolders({ config, actions })
+  await planFlatEmptySeriesFolders({ config, actions, flatPublisherFoldersByProduct })
   await planFlatEmptyLegacyFolders({ orders, config, actions, allBundleTitles })
 }
 
@@ -2270,6 +2297,103 @@ async function planFlatEmptyLegacyFolders({
           destinationPath: emptyDirectory,
           status: 'would-remove-empty-folder',
           reason: 'Empty legacy bundle folder will be removed.',
+        })
+      }
+    }
+  }
+}
+
+function plannedEmptyFolderSet(actions: OrganizeAction[]): Set<string> {
+  return new Set(
+    actions
+      .filter(
+        (action) =>
+          action.status === 'would-remove-empty-folder' || action.status === 'removed-empty-folder'
+      )
+      .map((action) => action.sourcePath)
+      .filter((sourcePath): sourcePath is string => sourcePath !== undefined)
+      .map((sourcePath) => path.resolve(sourcePath).toLowerCase())
+  )
+}
+
+function addEmptyFolderAction({
+  actions,
+  plannedEmptyFolders,
+  library,
+  emptyDirectory,
+  bundleTitle,
+  reason,
+}: {
+  actions: OrganizeAction[]
+  plannedEmptyFolders: Set<string>
+  library: ScanLibraryConfig
+  emptyDirectory: string
+  bundleTitle: string
+  reason: string
+}): void {
+  const normalizedEmptyDirectory = path.resolve(emptyDirectory).toLowerCase()
+  if (
+    normalizedEmptyDirectory === path.resolve(library.path).toLowerCase() ||
+    plannedEmptyFolders.has(normalizedEmptyDirectory)
+  ) {
+    return
+  }
+  plannedEmptyFolders.add(normalizedEmptyDirectory)
+  actions.push({
+    cacheKey: `empty:${normalizedEmptyDirectory}`,
+    filename: path.basename(emptyDirectory),
+    bundleTitle,
+    productTitle: 'Empty folder',
+    expectedLibraryName: library.name,
+    expectedLibraryPath: library.path,
+    selected: false,
+    sourcePath: emptyDirectory,
+    destinationPath: emptyDirectory,
+    status: 'would-remove-empty-folder',
+    reason,
+  })
+}
+
+async function planFlatEmptySeriesFolders({
+  config,
+  actions,
+  flatPublisherFoldersByProduct,
+}: {
+  config: AppConfig
+  actions: OrganizeAction[]
+  flatPublisherFoldersByProduct: Map<string, string>
+}): Promise<void> {
+  const plannedEmptyFolders = plannedEmptyFolderSet(actions)
+  const managedPublisherFamilies = new Set(
+    [...flatPublisherFoldersByProduct.values(), 'humble']
+      .map((folder) => normalizePublisherFamilyKey(folder))
+      .filter(Boolean)
+  )
+
+  for (const library of config.scanLibraries) {
+    let topLevelEntries
+    try {
+      topLevelEntries = await readdir(library.path, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of topLevelEntries.filter((topLevelEntry) => topLevelEntry.isDirectory())) {
+      const familyKey = normalizePublisherFamilyKey(entry.name)
+      if (!managedPublisherFamilies.has(familyKey)) {
+        continue
+      }
+      const publisherPath = path.join(library.path, entry.name)
+      const emptyDirectories = await collectEmptyDirectories(publisherPath)
+      emptyDirectories.sort((left, right) => right.length - left.length)
+      for (const emptyDirectory of emptyDirectories) {
+        addEmptyFolderAction({
+          actions,
+          plannedEmptyFolders,
+          library,
+          emptyDirectory,
+          bundleTitle: entry.name,
+          reason: 'Empty flat series folder will be removed.',
         })
       }
     }
@@ -2636,6 +2760,11 @@ export async function organizeLibrary({
       await planFlatEmptyPublisherFamilyFolders({
         config,
         actions,
+      })
+      await planFlatEmptySeriesFolders({
+        config,
+        actions,
+        flatPublisherFoldersByProduct,
       })
       await planFlatEmptyLegacyFolders({
         orders,

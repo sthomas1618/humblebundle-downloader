@@ -1906,7 +1906,7 @@ describe('organizeLibrary', () => {
     }
   })
 
-  it('moves untracked single-level leftovers to extras while leaving ambiguous files', async () => {
+  it('leaves manual untracked single-level leftovers in place', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 
     try {
@@ -1974,34 +1974,75 @@ describe('organizeLibrary', () => {
       })
 
       expect(report.ambiguous).toBe(1)
-      expect(report.untracked).toBe(0)
-      expect(report.movedSupplement).toBe(1)
+      expect(report.untracked).toBe(1)
+      expect(report.movedSupplement).toBe(0)
       expect(await readFile(ambiguousPath, 'utf8')).toBe('ambiguous')
-      expect(await pathExists(untrackedPath)).toBe(false)
-      const extrasPath = path.join(booksPath, 'ASP NET', 'Extras', 'manual.pdf')
-      expect(await readFile(extrasPath, 'utf8')).toBe('manual')
-      const cache = JSON.parse(await readFile(path.join(booksPath, '.cache.json'), 'utf8')) as
-        | Record<string, unknown>
-        | undefined
-      expect(cache?.['flat:books:extras:manual.pdf']).toEqual({
-        urlLastModified: expect.any(String),
+      expect(await readFile(untrackedPath, 'utf8')).toBe('manual')
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('moves untracked files from metadata-backed single-level leftovers to publisher extras', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const sourcePath = path.join(booksPath, 'FRONT END WEB DEVELOPMENT BY PACKT', 'index_1.png')
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'png')
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'books',
+        libraries: { books: { path: 'Books', layout: 'flat', extInclude: ['pdf', 'png'] } },
       })
-      expect(cache?.flatIndex).toMatchObject({
-        entries: {
-          'flat:books:extras:manual.pdf': {
-            canonicalPath: extrasPath,
-            publisher: 'ASP NET',
-            series: 'Extras',
-            productTitle: 'Extras',
-            bundleLocations: [
-              {
-                bundleTitle: 'ASP NET',
-                productTitle: 'Extras',
-              },
-            ],
-          },
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Book Bundle: Front End Web Development by Packt',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'HTML5 Game Development by Example',
+              downloads: [
+                {
+                  cacheKey: 'order-1:html5gamedevelopmentbyexample.pdf',
+                  filename: 'html5gamedevelopmentbyexample.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
         },
       })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          configPath,
+          mediaRoot: temporaryDirectory,
+          metadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              layout: 'flat',
+              extInclude: ['pdf', 'png'],
+            },
+          },
+        }),
+      })
+
+      const extrasPath = path.join(booksPath, 'Packt', 'Extras', 'index_1.png')
+      expect(report.movedSupplement).toBe(1)
+      expect(await readFile(extrasPath, 'utf8')).toBe('png')
+      expect(await pathExists(path.join(booksPath, 'FRONT END WEB DEVELOPMENT BY PACKT'))).toBe(
+        false
+      )
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
@@ -2488,6 +2529,69 @@ describe('organizeLibrary', () => {
       expect(await pathExists(kodanshaPath)).toBe(false)
       expect(await pathExists(kodanshaComicsPath)).toBe(false)
       expect(await pathExists(unrelatedEmptyPath)).toBe(true)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('removes empty series folders under managed flat publishers', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const emptySeriesPath = path.join(booksPath, 'Quarto', 'Drawing - Manga')
+      const manualEmptyPath = path.join(booksPath, 'Manual Publisher', 'Empty Series')
+      await mkdir(emptySeriesPath, { recursive: true })
+      await mkdir(manualEmptyPath, { recursive: true })
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'books',
+        libraries: { books: { path: 'Books', layout: 'flat', extInclude: ['pdf'] } },
+      })
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Book Bundle: Creating Comics, Manga, & Animation by Quarto',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Drawing: Manga',
+              downloads: [
+                {
+                  cacheKey: 'order-1:drawingmanga.pdf',
+                  filename: 'drawingmanga.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          configPath,
+          mediaRoot: temporaryDirectory,
+          defaultLibrary: 'books',
+          metadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              layout: 'flat',
+              extInclude: ['pdf'],
+            },
+          },
+        }),
+      })
+
+      expect(report.removedEmptyFolder).toBeGreaterThanOrEqual(1)
+      expect(await pathExists(emptySeriesPath)).toBe(false)
+      expect(await pathExists(manualEmptyPath)).toBe(true)
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
     }
