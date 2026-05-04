@@ -95,6 +95,29 @@ const PUBLISHER_SHOWCASE_PATTERNS = [
   /^(.+?)\s+(?:mega\s+bundle|anniversary(?:\s+bundle)?|spotlight|showcase)\s*$/i,
 ]
 
+const CURATED_PUBLISHER_PATTERNS: Array<{ folder: string; pattern: RegExp }> = [
+  { folder: 'Image Comics', pattern: /\b(?:image\s+comics|image\s+expo)\b/i },
+  { folder: 'IDW', pattern: /\bidw(?:'s)?\b/i },
+  { folder: 'Archie', pattern: /\barchie\b/i },
+  { folder: 'Heavy Metal', pattern: /\bheavy\s+metal\b/i },
+  { folder: 'Humanoids', pattern: /\bhumanoids\b/i },
+  { folder: 'Walter Foster', pattern: /\bwalter\s+foster\b/i },
+  { folder: 'Black Decker', pattern: /\bblack\s*(?:\+|and)?\s*decker\b/i },
+  { folder: 'Dynamite', pattern: /\bdynamite(?:'s)?\b/i },
+  { folder: 'Titan', pattern: /\btitan\s+comics\b/i },
+  { folder: 'Valiant', pattern: /\bvaliant\b/i },
+]
+
+function inferCuratedPublisherFolder(bundleTitle: string): string | undefined {
+  if (
+    !/\bbundle\b/i.test(bundleTitle) &&
+    !/^the bleeding heart of heavy metal\b/i.test(bundleTitle)
+  ) {
+    return undefined
+  }
+  return CURATED_PUBLISHER_PATTERNS.find(({ pattern }) => pattern.test(bundleTitle))?.folder
+}
+
 export function inferPublisherFocusedFolder(bundleTitle: string): string | undefined {
   const title = bundleTitle.replace(/\s+encore\b/i, '').trim()
   for (const pattern of PUBLISHER_SHOWCASE_PATTERNS) {
@@ -116,6 +139,7 @@ export function inferPublisherFolder(bundleTitle: string): string {
     title.match(/\bpresented by\s+(.+?)\s*$/i)?.[1] ??
     (finalByPublisher?.match(/\bfrom\b/i) ? undefined : finalByPublisher) ??
     finalFromPublisher ??
+    inferCuratedPublisherFolder(title) ??
     inferPublisherFocusedFolder(title) ??
     inferColonPublisher(title) ??
     'humble'

@@ -62,6 +62,49 @@ describe('fs utils', () => {
     )
   })
 
+  it('infers conservative curated publisher families from bundle titles', () => {
+    expect(inferPublisherFolder("Humble Comic Bundle: Image Comics in the '10s")).toBe(
+      'Image Comics'
+    )
+    expect(inferPublisherFolder('Humble Comics Bundle: Image Expo 2018')).toBe('Image Comics')
+    expect(inferPublisherFolder("Humble Comics Bundle: Fresh Ink: IDW's Latest and Greatest")).toBe(
+      'IDW'
+    )
+    expect(inferPublisherFolder('Humble Comics Bundle: Horror With Archie')).toBe('Archie')
+    expect(inferPublisherFolder('The Bleeding Heart of Heavy Metal, Vol. 1')).toBe('Heavy Metal')
+    expect(inferPublisherFolder("Humble Comic Bundle: HEAVY METAL's Heaviest Metal")).toBe(
+      'Heavy Metal'
+    )
+    expect(
+      inferPublisherFolder('Humble Comics Bundle: Humanoids Megabundle Featuring The Incal')
+    ).toBe('Humanoids')
+    expect(inferPublisherFolder('Humble Book Bundle: Learn to Draw with Walter Foster')).toBe(
+      'Walter Foster'
+    )
+    expect(inferPublisherFolder('Humble Book Bundle: Black+Decker Home How-To Guides')).toBe(
+      'Black Decker'
+    )
+    expect(inferPublisherFolder("Humble Comics Bundle: Dynamite's 15th Anniversary Party")).toBe(
+      'Dynamite'
+    )
+    expect(inferPublisherFolder('Humble Comics Bundle: Titan Comics Showcase')).toBe('Titan')
+    expect(inferPublisherFolder('Humble Comics Bundle: Valiant Hero Universe Origins')).toBe(
+      'Valiant'
+    )
+  })
+
+  it('does not infer publishers from generic bundle families', () => {
+    expect(inferPublisherFolder('Humble Book Bundle: Be the Change')).toBe('humble')
+    expect(inferPublisherFolder('Humble Comics Bundle: Heroes of Indie Comics')).toBe('humble')
+    expect(inferPublisherFolder('Humble Comics Bundle: Start Here!')).toBe('humble')
+    expect(inferPublisherFolder('Humble Book Bundle: Tales of Horror')).toBe('humble')
+    expect(inferPublisherFolder('Humble Fight for Racial Justice Bundle')).toBe('humble')
+    expect(inferPublisherFolder('Humble Manga Bundle: Spring 2021 Anime Season')).toBe('humble')
+    expect(inferPublisherFolder('Humble Manga Bundle: Attack on Titan Final Season')).toBe('humble')
+    expect(inferPublisherFolder('IDW')).toBe('humble')
+    expect(inferPublisherFolder('Black Decker')).toBe('humble')
+  })
+
   it('groups publisher variants by normalized family suffixes', () => {
     expect(normalizePublisherFamilyKey('IDW Publishing')).toBe(normalizePublisherFamilyKey('IDW'))
     expect(normalizePublisherFamilyKey('Kodansha Comics')).toBe(
