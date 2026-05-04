@@ -277,6 +277,255 @@ describe('organizeLibrary', () => {
     }
   })
 
+  it('plans flat moves using curated publisher text from bundle titles', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = "Humble Comic Bundle: Image Comics in the '10s"
+      const productTitle = 'Saga Vol. 1'
+      const filename = 'saga_vol1.cbz'
+      const sourcePath = path.join(
+        buildProductFolder(comicsPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'cbz content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz'],
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]).toMatchObject({
+        status: 'would-move',
+        sourcePath,
+        destinationPath: path.join(comicsPath, 'Image Comics', 'Saga', filename),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('plans flat book moves using curated Walter Foster bundle text', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Learn to Draw with Walter Foster'
+      const productTitle = 'Drawing - Horses'
+      const filename = 'drawing_horses.epub'
+      const sourcePath = path.join(
+        buildProductFolder(booksPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'epub content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          metadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub'],
+              extInclude: ['epub'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]).toMatchObject({
+        status: 'would-move',
+        sourcePath,
+        destinationPath: path.join(booksPath, 'Walter Foster', 'Drawing - Horses', filename),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('plans flat book moves using curated Black Decker bundle text', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Black+Decker Home How-To Guides'
+      const productTitle = 'Black & Decker The Complete Guide to Wiring'
+      const filename = 'blackanddecker_wiring.epub'
+      const sourcePath = path.join(
+        buildProductFolder(booksPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'epub content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          metadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub'],
+              extInclude: ['epub'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]).toMatchObject({
+        status: 'would-move',
+        sourcePath,
+        destinationPath: path.join(
+          booksPath,
+          'Black Decker',
+          'Black Decker The Complete Guide to Wiring',
+          filename
+        ),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps unknown manga bundle products grouped under humble series folders', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const mangaPath = path.join(temporaryDirectory, 'Manga')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Manga Bundle: Spring 2021 Anime Season'
+      const productTitle = 'Tokyo Revengers Vol. 1'
+      const filename = 'tokyo_revengers_vol1.cbz'
+      const sourcePath = path.join(
+        buildProductFolder(mangaPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'cbz content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'manga',
+          metadataPath,
+          libraries: {
+            manga: {
+              path: mangaPath,
+              formatPriority: ['cbz'],
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]).toMatchObject({
+        status: 'would-move',
+        sourcePath,
+        destinationPath: path.join(mangaPath, 'humble', 'Tokyo Revengers', filename),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('uses observed publisher variants to choose one flat publisher folder', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 
