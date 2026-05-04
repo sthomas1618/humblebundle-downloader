@@ -526,6 +526,67 @@ describe('organizeLibrary', () => {
     }
   })
 
+  it('does not treat Attack on Titan manga bundle titles as Titan publisher matches', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const mangaPath = path.join(temporaryDirectory, 'Manga')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Manga Bundle: Attack on Titan Final Season'
+      const productTitle = 'Attack on Titan Vol. 1'
+      const filename = 'attack_on_titan_vol1.cbz'
+      const sourcePath = path.join(
+        buildProductFolder(mangaPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'cbz content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'manga',
+          metadataPath,
+          libraries: {
+            manga: {
+              path: mangaPath,
+              formatPriority: ['cbz'],
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]).toMatchObject({
+        status: 'would-move',
+        sourcePath,
+        destinationPath: path.join(mangaPath, 'humble', 'Attack on Titan', filename),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('uses observed publisher variants to choose one flat publisher folder', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 

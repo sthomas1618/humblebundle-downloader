@@ -104,7 +104,7 @@ const CURATED_PUBLISHER_PATTERNS: Array<{ folder: string; pattern: RegExp }> = [
   { folder: 'Walter Foster', pattern: /\bwalter\s+foster\b/i },
   { folder: 'Black Decker', pattern: /\bblack\s*(?:\+|and)?\s*decker\b/i },
   { folder: 'Dynamite', pattern: /\bdynamite(?:'s)?\b/i },
-  { folder: 'Titan', pattern: /\btitan\b/i },
+  { folder: 'Titan', pattern: /\btitan\s+comics\b/i },
   { folder: 'Valiant', pattern: /\bvaliant\b/i },
 ]
 

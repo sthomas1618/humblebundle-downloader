@@ -100,6 +100,7 @@ describe('fs utils', () => {
     expect(inferPublisherFolder('Humble Book Bundle: Tales of Horror')).toBe('humble')
     expect(inferPublisherFolder('Humble Fight for Racial Justice Bundle')).toBe('humble')
     expect(inferPublisherFolder('Humble Manga Bundle: Spring 2021 Anime Season')).toBe('humble')
+    expect(inferPublisherFolder('Humble Manga Bundle: Attack on Titan Final Season')).toBe('humble')
     expect(inferPublisherFolder('IDW')).toBe('humble')
     expect(inferPublisherFolder('Black Decker')).toBe('humble')
   })
