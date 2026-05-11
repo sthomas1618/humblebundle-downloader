@@ -5,10 +5,12 @@ import path from 'node:path'
 import {
   collectImages,
   createCbz,
+  mergeComicInfoXml,
   naturalSort,
   readComicInfoXml,
   runPdfImages,
   runPdfRender,
+  type ComicInfoFields,
 } from './pdf2cbz-helpers'
 
 export { pdf2cbzTestUtils } from './pdf2cbz-helpers'
@@ -18,6 +20,7 @@ export type Pdf2CbzOptions = {
   keepTemp?: boolean
   renderFallback?: boolean
   renderTool?: 'pdftoppm' | 'mutool'
+  comicInfoFields?: ComicInfoFields
 }
 
 export type Pdf2CbzResult = {
@@ -25,6 +28,10 @@ export type Pdf2CbzResult = {
   temporaryDirectory: string
   imageCount: number
   usedRenderFallback: boolean
+  comicInfoPreserved: boolean
+  comicInfoGenerated: boolean
+  comicInfoMerged: boolean
+  comicInfoFields: string[]
 }
 
 export async function convertPdfToCbz(
@@ -58,13 +65,18 @@ export async function convertPdfToCbz(
     }
 
     images.sort((a, b) => naturalSort(path.basename(a), path.basename(b)))
-    await createCbz(options.cbzPath, images, preservedComicInfo)
+    const comicInfo = mergeComicInfoXml(preservedComicInfo, options.comicInfoFields ?? {})
+    await createCbz(options.cbzPath, images, comicInfo.xml)
 
     return {
       cbzPath: options.cbzPath,
       temporaryDirectory,
       imageCount: images.length,
       usedRenderFallback,
+      comicInfoPreserved: comicInfo.preserved,
+      comicInfoGenerated: comicInfo.generated,
+      comicInfoMerged: comicInfo.merged,
+      comicInfoFields: comicInfo.fields,
     }
   } finally {
     if (!options.keepTemp) {

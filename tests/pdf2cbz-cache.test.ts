@@ -34,4 +34,26 @@ describe('pdf2cbz cache invalidation', () => {
     const shouldRegen = shouldRegeneratePdfCbz(baseEntry, { mtimeMs: 1234, size: 4567 }, true)
     expect(shouldRegen).toBe(true)
   })
+
+  it('regenerates when a manifest entry has missing or stale CBZ stats', () => {
+    const entry: PdfCbzCacheEntry = {
+      ...baseEntry,
+      cbzMtimeMs: 111,
+      cbzSize: 222,
+    }
+
+    expect(shouldRegeneratePdfCbz(entry, { mtimeMs: 1234, size: 4567 }, false)).toBe(true)
+    expect(
+      shouldRegeneratePdfCbz(entry, { mtimeMs: 1234, size: 4567 }, false, {
+        mtimeMs: 111,
+        size: 999,
+      })
+    ).toBe(true)
+    expect(
+      shouldRegeneratePdfCbz(entry, { mtimeMs: 1234, size: 4567 }, false, {
+        mtimeMs: 111,
+        size: 222,
+      })
+    ).toBe(false)
+  })
 })

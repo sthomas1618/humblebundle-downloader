@@ -35,6 +35,97 @@ async function writeMetadata(metadataPath: string, orders: Record<string, unknow
   )
 }
 
+async function writeEnrichedMetadata(
+  enrichedMetadataPath: string,
+  products: Record<string, unknown>
+): Promise<void> {
+  await mkdir(path.dirname(enrichedMetadataPath), { recursive: true })
+  await writeFile(
+    enrichedMetadataPath,
+    JSON.stringify(
+      {
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        summary: {
+          scanned: 1,
+          extracted: 1,
+          skipped: 0,
+          errors: 0,
+          matchedFiles: 1,
+          unmatchedFiles: 0,
+        },
+        files: [],
+        products,
+      },
+      undefined,
+      2
+    )
+  )
+}
+
+async function writeFlatPublisherFixture({
+  libraryPath,
+  metadataPath,
+  enrichedMetadataPath,
+  bundleTitle,
+  products,
+  extension = 'epub',
+}: {
+  libraryPath: string
+  metadataPath: string
+  enrichedMetadataPath: string
+  bundleTitle: string
+  products: Array<{ title: string; filename: string; enrichedPublisher: string }>
+  extension?: string
+}): Promise<void> {
+  for (const product of products) {
+    const sourcePath = path.join(
+      buildProductFolder(libraryPath, bundleTitle, product.title),
+      product.filename
+    )
+    await mkdir(path.dirname(sourcePath), { recursive: true })
+    await writeFile(sourcePath, `${product.title} content`)
+  }
+  await writeMetadata(metadataPath, {
+    'order-1': {
+      orderId: 'order-1',
+      bundleTitle,
+      updatedAt: new Date().toISOString(),
+      products: products.map((product) => ({
+        productTitle: product.title,
+        downloads: [
+          {
+            cacheKey: `order-1:${product.filename}`,
+            filename: product.filename,
+            extension,
+            platform: extension === 'cbz' ? 'comic' : 'ebook',
+          },
+        ],
+      })),
+    },
+  })
+  await writeEnrichedMetadata(
+    enrichedMetadataPath,
+    Object.fromEntries(
+      products.map((product) => [
+        product.title.toLowerCase(),
+        {
+          productKey: product.title.toLowerCase(),
+          productTitle: product.title,
+          files: [],
+          matches: [],
+          publisher: {
+            value: product.enrichedPublisher,
+            source: 'epub-opf',
+            confidence: 0.95,
+            evidence: ['epub:dc:publisher'],
+          },
+        },
+      ])
+    )
+  )
+}
+
 async function writeConfig(configPath: string, data: unknown): Promise<void> {
   await mkdir(path.dirname(configPath), { recursive: true })
   await writeFile(configPath, JSON.stringify(data, undefined, 2))
@@ -145,6 +236,175 @@ async function setupKnownMd5FlatConflict({
 }
 
 describe('organizeLibrary', () => {
+  it('uses root flat layout for plain organize runs', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+      await writeFlatPublisherFixture({
+        libraryPath: booksPath,
+        metadataPath,
+        enrichedMetadataPath,
+        bundleTitle: 'Humble Book Bundle: Useful Books by Small Press',
+        products: [
+          {
+            title: 'Useful Book',
+            filename: 'useful.epub',
+            enrichedPublisher: 'Small Press',
+          },
+        ],
+      })
+
+      const report = await organizeLibrary({
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          layout: 'flat',
+          metadataPath,
+          enrichedMetadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              extInclude: ['epub'],
+            },
+          },
+        }),
+      })
+
+      expect(report.wouldMove).toBe(1)
+      expect(report.actions[0]).toMatchObject({
+        status: 'would-move',
+        sourcePath: path.join(
+          booksPath,
+          'Humble Book Bundle - Useful Books by Small Press',
+          'Useful Book',
+          'useful.epub'
+        ),
+        destinationPath: path.join(booksPath, 'Small Press', 'Useful Book', 'useful.epub'),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('uses root flat layout to plan managed humble leftovers without --flat', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const sourcePath = path.join(comicsPath, 'humble', 'Saga', 'saga_vol1.cbz')
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'cbz')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Comics Bundle: Saga by Image Comics',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Saga Vol. 1',
+              downloads: [
+                {
+                  cacheKey: 'order-1:saga_vol1.cbz',
+                  filename: 'saga_vol1.cbz',
+                  extension: 'cbz',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          layout: 'flat',
+          metadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      expect(report.wouldMoveSupplement).toBe(1)
+      expect(
+        report.actions.find((action) => action.status === 'would-move-supplement')
+      ).toMatchObject({
+        status: 'would-move-supplement',
+        sourcePath,
+        destinationPath: path.join(comicsPath, 'Image Comics', 'Saga', 'saga_vol1.cbz'),
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('lets library bundle layout override root flat layout during organize', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const sourcePath = path.join(
+        buildProductFolder(
+          booksPath,
+          'Humble Book Bundle: Useful Books by Small Press',
+          'Useful Book'
+        ),
+        'useful.epub'
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'epub')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle: 'Humble Book Bundle: Useful Books by Small Press',
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: 'Useful Book',
+              downloads: [
+                {
+                  cacheKey: 'order-1:useful.epub',
+                  filename: 'useful.epub',
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          layout: 'flat',
+          metadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              layout: 'bundle',
+              extInclude: ['epub'],
+            },
+          },
+        }),
+      })
+
+      expect(report.alreadyCorrect).toBe(1)
+      expect(report.wouldMove).toBe(0)
+      expect(report.wouldMoveSupplement).toBe(0)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('plans flat publisher and series moves without changing files during a dry run', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 
@@ -259,6 +519,463 @@ describe('organizeLibrary', () => {
         config: resolveConfig({
           defaultLibrary: 'books',
           metadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]?.destinationPath).toBe(
+        path.join(booksPath, 'humble', 'Civic Guide', filename)
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('uses high-confidence enriched publishers for flat product folders', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Be the Change'
+      const productTitle = 'Civic Guide Book 1'
+      const filename = 'civic_guide.epub'
+      const sourcePath = path.join(
+        buildProductFolder(booksPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'epub content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+      await writeEnrichedMetadata(enrichedMetadataPath, {
+        'civic guide book 1': {
+          productKey: 'civic guide book 1',
+          productTitle,
+          files: [sourcePath],
+          matches: [],
+          publisher: {
+            value: 'Civic House',
+            source: 'epub-opf',
+            confidence: 0.95,
+            evidence: ['epub:dc:publisher'],
+          },
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          metadataPath,
+          enrichedMetadataPath,
+          routes: [{ id: 'ebook-formats', library: 'books', extensions: ['epub'] }],
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions[0]?.destinationPath).toBe(
+        path.join(booksPath, 'Civic House', 'Civic Guide', filename)
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves enriched publishers to existing flat publisher family folders', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Publisher Metadata'
+      const products = [
+        {
+          key: 'no starch guide book 1',
+          title: 'No Starch Guide Book 1',
+          filename: 'no_starch.epub',
+          enrichedPublisher: 'No Starch Press',
+          expectedPublisher: 'No Starch',
+        },
+        {
+          key: 'idw guide book 1',
+          title: 'IDW Guide Book 1',
+          filename: 'idw.epub',
+          enrichedPublisher: 'IDW Publishing',
+          expectedPublisher: 'IDW',
+        },
+        {
+          key: 'dynamite guide book 1',
+          title: 'Dynamite Guide Book 1',
+          filename: 'dynamite.epub',
+          enrichedPublisher: 'Dynamite Entertainment',
+          expectedPublisher: 'Dynamite',
+        },
+        {
+          key: 'civic guide book 1',
+          title: 'Civic Guide Book 1',
+          filename: 'civic.epub',
+          enrichedPublisher: 'Civic House Press',
+          expectedPublisher: 'Civic House',
+        },
+      ]
+
+      for (const folder of ['No Starch', 'IDW', 'Dynamite']) {
+        await mkdir(path.join(booksPath, folder), { recursive: true })
+      }
+      for (const product of products) {
+        const sourcePath = path.join(
+          buildProductFolder(booksPath, bundleTitle, product.title),
+          product.filename
+        )
+        await mkdir(path.dirname(sourcePath), { recursive: true })
+        await writeFile(sourcePath, `${product.title} content`)
+      }
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: products.map((product) => ({
+            productTitle: product.title,
+            downloads: [
+              {
+                cacheKey: `order-1:${product.filename}`,
+                filename: product.filename,
+                extension: 'epub',
+                platform: 'ebook',
+              },
+            ],
+          })),
+        },
+      })
+      await writeEnrichedMetadata(
+        enrichedMetadataPath,
+        Object.fromEntries(
+          products.map((product) => [
+            product.key,
+            {
+              productKey: product.key,
+              productTitle: product.title,
+              files: [],
+              matches: [],
+              publisher: {
+                value: product.enrichedPublisher,
+                source: 'epub-opf',
+                confidence: 0.95,
+                evidence: ['epub:dc:publisher'],
+              },
+            },
+          ])
+        )
+      )
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          metadataPath,
+          enrichedMetadataPath,
+          routes: [{ id: 'ebook-formats', library: 'books', extensions: ['epub'] }],
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub', 'pdf', 'mobi'],
+              extInclude: ['epub', 'pdf', 'mobi'],
+            },
+          },
+        }),
+      })
+
+      for (const product of products) {
+        expect(report.actions).toContainEqual(
+          expect.objectContaining({
+            productTitle: product.title,
+            destinationPath: path.join(
+              booksPath,
+              product.expectedPublisher,
+              product.title.replace(' Book 1', ''),
+              product.filename
+            ),
+          })
+        )
+      }
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('uses dominant enriched evidence when source publisher evidence is weak', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+      const bundleTitle = 'Humble Comics Bundle: Dynamic Forces 20th Anniversary Party'
+      const products = ['Vampirella Archives', 'Red Sonja Archives', 'Project Superpowers'].map(
+        (title, index) => ({
+          title,
+          filename: `dynamite_${index}.cbz`,
+          enrichedPublisher: 'Dynamite Entertainment',
+        })
+      )
+
+      await mkdir(path.join(comicsPath, 'Dynamite'), { recursive: true })
+      await writeFlatPublisherFixture({
+        libraryPath: comicsPath,
+        metadataPath,
+        enrichedMetadataPath,
+        bundleTitle,
+        products,
+        extension: 'cbz',
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          metadataPath,
+          enrichedMetadataPath,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz'],
+              extInclude: ['cbz'],
+            },
+          },
+        }),
+      })
+
+      for (const product of products) {
+        expect(report.actions).toContainEqual(
+          expect.objectContaining({
+            productTitle: product.title,
+            destinationPath: path.join(comicsPath, 'Dynamite', product.title, product.filename),
+          })
+        )
+      }
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('does not let one enriched parent-style value override strong source publisher evidence', async () => {
+    const cases = [
+      {
+        bundleTitle: 'Humble Comics Bundle: Noir Crime by Hard Case Crime',
+        productTitle: 'Quarry Stories',
+        enrichedPublisher: 'Titan Books',
+        expectedPublisher: 'Hard Case Crime',
+      },
+      {
+        bundleTitle: 'Bushcraft & Homestead Handbook Series by Adams Media',
+        productTitle: 'The Backyard Homestead',
+        enrichedPublisher: 'F_W Media Inc',
+        expectedPublisher: 'Adams Media',
+      },
+      {
+        bundleTitle: 'Humble Comics Bundle: Art Books by Dynamite',
+        productTitle: 'The Art of Atari',
+        enrichedPublisher: 'Dynamic Forces',
+        expectedPublisher: 'Dynamite',
+      },
+    ]
+
+    for (const testCase of cases) {
+      const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+      try {
+        const libraryPath = path.join(temporaryDirectory, 'Library')
+        const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+        const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+        const filename = `${testCase.productTitle.toLowerCase().replaceAll(/\W+/g, '_')}.epub`
+        await mkdir(path.join(libraryPath, testCase.expectedPublisher), { recursive: true })
+        await writeFlatPublisherFixture({
+          libraryPath,
+          metadataPath,
+          enrichedMetadataPath,
+          bundleTitle: testCase.bundleTitle,
+          products: [
+            {
+              title: testCase.productTitle,
+              filename,
+              enrichedPublisher: testCase.enrichedPublisher,
+            },
+          ],
+        })
+
+        const report = await organizeLibrary({
+          flat: true,
+          config: resolveConfig({
+            defaultLibrary: 'books',
+            metadataPath,
+            enrichedMetadataPath,
+            libraries: {
+              books: {
+                path: libraryPath,
+                formatPriority: ['epub'],
+                extInclude: ['epub'],
+              },
+            },
+          }),
+        })
+
+        expect(report.actions).toContainEqual(
+          expect.objectContaining({
+            productTitle: testCase.productTitle,
+            destinationPath: path.join(
+              libraryPath,
+              testCase.expectedPublisher,
+              testCase.productTitle,
+              filename
+            ),
+          })
+        )
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('routes brand-like bundle publishers through enriched existing publisher families', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Black+Decker Home How-To Guides'
+      const productTitle = 'Black Decker Complete Guide to Plumbing'
+      const filename = 'black_decker_plumbing.epub'
+
+      await mkdir(path.join(booksPath, 'Quarto'), { recursive: true })
+      await writeFlatPublisherFixture({
+        libraryPath: booksPath,
+        metadataPath,
+        enrichedMetadataPath,
+        bundleTitle,
+        products: [{ title: productTitle, filename, enrichedPublisher: 'The Quarto Group' }],
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          metadataPath,
+          enrichedMetadataPath,
+          libraries: {
+            books: {
+              path: booksPath,
+              formatPriority: ['epub'],
+              extInclude: ['epub'],
+            },
+          },
+        }),
+      })
+
+      expect(report.actions).toContainEqual(
+        expect.objectContaining({
+          productTitle,
+          destinationPath: path.join(booksPath, 'Quarto', productTitle, filename),
+        })
+      )
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores enriched publishers when disabled', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const enrichedMetadataPath = path.join(temporaryDirectory, '.hbd', 'enriched-metadata.json')
+      const bundleTitle = 'Humble Book Bundle: Be the Change'
+      const productTitle = 'Civic Guide Book 1'
+      const filename = 'civic_guide.epub'
+      const sourcePath = path.join(
+        buildProductFolder(booksPath, bundleTitle, productTitle),
+        filename
+      )
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'epub content')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'epub',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+      await writeEnrichedMetadata(enrichedMetadataPath, {
+        'civic guide book 1': {
+          productKey: 'civic guide book 1',
+          productTitle,
+          files: [sourcePath],
+          matches: [],
+          publisher: {
+            value: 'Civic House',
+            source: 'epub-opf',
+            confidence: 0.95,
+            evidence: ['epub:dc:publisher'],
+          },
+        },
+      })
+
+      const report = await organizeLibrary({
+        flat: true,
+        useEnrichedMetadata: false,
+        config: resolveConfig({
+          defaultLibrary: 'books',
+          metadataPath,
+          enrichedMetadataPath,
+          routes: [{ id: 'ebook-formats', library: 'books', extensions: ['epub'] }],
           libraries: {
             books: {
               path: booksPath,
@@ -1542,7 +2259,7 @@ describe('organizeLibrary', () => {
         }),
       })
 
-      expect(report.moved).toBe(1)
+      expect(report.moved + report.movedSupplement).toBe(1)
       expect(await readFile(destinationPath, 'utf8')).toBe('comic')
       expect(await pathExists(sourcePath)).toBe(false)
     } finally {
@@ -1937,6 +2654,81 @@ describe('organizeLibrary', () => {
         ])
       )
       expect(await readFile(destinationPath, 'utf8')).toBe('one shot')
+      expect(await pathExists(sourcePath)).toBe(false)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('moves managed humble leftovers using publisher names from existing flat folders', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const configPath = path.join(temporaryDirectory, '.hbd', 'config.json')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const bundleTitle = 'Humble Comics Bundle: Top Cow Classics'
+      const productTitle = 'Artifacts #1'
+      const filename = 'artifacts_issue1.pdf'
+      const sourcePath = path.join(comicsPath, 'humble', 'Artifacts', filename)
+      const destinationPath = path.join(comicsPath, 'Top Cow', 'Artifacts', filename)
+
+      await mkdir(path.join(comicsPath, 'Top Cow'), { recursive: true })
+      await mkdir(path.dirname(sourcePath), { recursive: true })
+      await writeFile(sourcePath, 'artifact')
+      await writeConfig(configPath, {
+        version: 1,
+        defaultLibrary: 'comics',
+        libraries: {
+          comics: { path: 'Comics', layout: 'flat', extInclude: ['pdf'] },
+        },
+      })
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle,
+              downloads: [
+                {
+                  cacheKey: `order-1:${filename}`,
+                  filename,
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+
+      const report = await organizeLibrary({
+        apply: true,
+        flat: true,
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          configPath,
+          mediaRoot: temporaryDirectory,
+          metadataPath,
+          libraries: {
+            comics: { path: comicsPath, layout: 'flat', extInclude: ['pdf'] },
+          },
+        }),
+      })
+
+      expect(report.moved + report.movedSupplement).toBe(1)
+      expect(report.actions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: 'moved-supplement',
+            sourcePath,
+            destinationPath,
+          }),
+        ])
+      )
+      expect(await readFile(destinationPath, 'utf8')).toBe('artifact')
       expect(await pathExists(sourcePath)).toBe(false)
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })
@@ -4398,10 +5190,12 @@ describe('organizeLibrary', () => {
 
       expect(report.moved).toBe(1)
       const updatedConfig = JSON.parse(await readFile(configPath, 'utf8')) as {
+        layout?: string
         flatConflictResolution?: string
         libraries: { comics: { layout?: string } }
       }
-      expect(updatedConfig.libraries.comics.layout).toBe('flat')
+      expect(updatedConfig.layout).toBe('flat')
+      expect(updatedConfig.libraries.comics.layout).toBeUndefined()
       expect(updatedConfig.flatConflictResolution).toBe('prefer-known-md5-then-largest')
       expect(await pathExists(path.join(comicsPath, 'Image Comics', 'Saga', filename))).toBe(true)
       const cache = JSON.parse(await readFile(path.join(comicsPath, '.cache.json'), 'utf8')) as
@@ -4513,10 +5307,12 @@ describe('organizeLibrary', () => {
       })
 
       const updatedConfig = JSON.parse(await readFile(configPath, 'utf8')) as {
+        layout?: string
         flatConflictResolution?: string
         libraries: { comics: { layout?: string } }
       }
-      expect(updatedConfig.libraries.comics.layout).toBe('flat')
+      expect(updatedConfig.layout).toBe('flat')
+      expect(updatedConfig.libraries.comics.layout).toBeUndefined()
       expect(updatedConfig.flatConflictResolution).toBe('report')
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })

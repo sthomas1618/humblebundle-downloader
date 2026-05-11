@@ -14,6 +14,7 @@ type OrganizeOptions = {
   scanPath?: string[]
   cachePath?: string
   metadataPath?: string
+  enrichedMetadataPath?: string
   trove?: boolean
   platform?: string[]
   include?: string[]
@@ -28,6 +29,7 @@ type OrganizeOptions = {
   reportPath?: string
   json?: boolean
   verbose?: boolean
+  enrichedMetadata?: boolean
 }
 
 export function registerOrganizeCommand(program: Command): void {
@@ -42,10 +44,7 @@ export function registerOrganizeCommand(program: Command): void {
   organizeCommand
     .option('--apply', 'Move files; omitted by default for a dry run')
     .option('--canonical', 'Also move files already in the right library into canonical folders')
-    .option(
-      '--flat',
-      'Organize products into publisher/series folders and mark applied libraries flat'
-    )
+    .option('--flat', 'Organize products into publisher/series folders for this run')
     .option(
       '--resolve-conflicts <mode>',
       'How --flat resolves conflicts: report, prefer-flat, prefer-largest, prefer-md5-match, prefer-known-md5, prefer-known-md5-then-largest'
@@ -54,6 +53,7 @@ export function registerOrganizeCommand(program: Command): void {
     .option('--report-path <path>', 'Write the full organize report to this path')
     .option('--json', 'Print the full organize report as JSON')
     .option('--verbose', 'Print each planned move, missing file, and conflict')
+    .option('--no-enriched-metadata', 'Ignore enriched metadata sidecar publisher hints')
     .action(async () => {
       const options = organizeCommand.optsWithGlobals<OrganizeOptions>()
       const { config } = await resolveCommandConfig(organizeCommand, options)
@@ -67,6 +67,8 @@ export function registerOrganizeCommand(program: Command): void {
           resolveConflicts: options.resolveConflicts,
           conflictDir: options.conflictDir,
           reportPath: options.reportPath,
+          useEnrichedMetadata: options.enrichedMetadata !== false,
+          enrichedMetadataPath: options.enrichedMetadataPath,
           onProgress: options.json ? undefined : (message) => console.info(message),
         })
 

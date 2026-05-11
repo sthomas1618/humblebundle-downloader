@@ -18,6 +18,7 @@ export type ConfigurableCommandOptions = {
   scanPath?: string[]
   cachePath?: string
   metadataPath?: string
+  enrichedMetadataPath?: string
   trove?: boolean
   update?: boolean
   platform?: string[]
@@ -60,6 +61,7 @@ export async function resolveCommandConfig(
     scanPaths: options.scanPath,
     cachePath: options.cachePath,
     metadataPath: options.metadataPath,
+    enrichedMetadataPath: options.enrichedMetadataPath,
     troveOnly: options.trove,
     showProgress: options.progress,
     updateOnly: options.update,

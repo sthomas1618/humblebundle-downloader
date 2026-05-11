@@ -33,9 +33,12 @@ describe('config file loading', () => {
       const configPath = await writeConfig(mediaRoot, {
         version: 1,
         defaultLibrary: 'comics',
+        layout: 'flat',
         cachePath: '.hbd/cache.json',
         failureReportPath: '.hbd/download-failures.json',
         metadataPath: '.hbd/metadata.json',
+        enrichedMetadataPath: '.hbd/enriched-metadata.json',
+        archiveRoot: 'Media Archive',
         flatConflictResolution: 'prefer-known-md5-then-largest',
         routes: [{ extensions: ['EPUB', 'MOBI'], library: 'books' }],
         libraries: {
@@ -43,6 +46,7 @@ describe('config file loading', () => {
             path: 'Comics/comics',
             layout: 'flat',
             formatPriority: ['CBZ', 'PDF'],
+            archiveFormats: ['PDF', 'EPUB'],
             extInclude: ['CBZ', 'PDF'],
           },
           books: {
@@ -59,9 +63,12 @@ describe('config file loading', () => {
       expect(loaded.mediaRoot).toBe(mediaRoot)
       expect(loaded.overrides).toMatchObject({
         defaultLibrary: 'comics',
+        layout: 'flat',
         cachePath: path.join(mediaRoot, '.hbd', 'cache.json'),
         failureReportPath: path.join(mediaRoot, '.hbd', 'download-failures.json'),
         metadataPath: path.join(mediaRoot, '.hbd', 'metadata.json'),
+        enrichedMetadataPath: path.join(mediaRoot, '.hbd', 'enriched-metadata.json'),
+        archiveRoot: path.join(mediaRoot, 'Media Archive'),
         flatConflictResolution: 'prefer-known-md5-then-largest',
         routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
         libraries: {
@@ -69,11 +76,12 @@ describe('config file loading', () => {
             path: path.join(mediaRoot, 'Comics', 'comics'),
             layout: 'flat',
             formatPriority: ['cbz', 'pdf'],
+            archiveFormats: ['pdf', 'epub'],
             extInclude: ['cbz', 'pdf'],
           },
           books: {
             path: path.join(mediaRoot, 'Books'),
-            layout: 'bundle',
+            layout: 'flat',
             formatPriority: ['epub', 'pdf', 'mobi'],
             extInclude: ['epub', 'pdf', 'mobi'],
           },
@@ -101,6 +109,9 @@ describe('config file loading', () => {
         path.join(mediaRoot, '.hbd', 'download-failures.json')
       )
       expect(loaded.overrides.metadataPath).toBe(path.join(mediaRoot, '.hbd', 'metadata.json'))
+      expect(loaded.overrides.enrichedMetadataPath).toBe(
+        path.join(mediaRoot, '.hbd', 'enriched-metadata.json')
+      )
     })
   })
 
@@ -126,6 +137,12 @@ describe('config file loading', () => {
           version: 1,
           defaultLibrary: 'comics',
           flatConflictResolution: 'largest-ish',
+          libraries: { comics: { path: 'Comics' } },
+        },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          layout: 'shelf',
           libraries: { comics: { path: 'Comics' } },
         },
         {
@@ -232,6 +249,7 @@ describe('config init', () => {
         cachePath: '.hbd/cache.json',
         failureReportPath: '.hbd/download-failures.json',
         metadataPath: '.hbd/metadata.json',
+        enrichedMetadataPath: '.hbd/enriched-metadata.json',
         routes: [
           {
             id: 'manga-bundles',

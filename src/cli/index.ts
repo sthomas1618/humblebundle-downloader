@@ -5,6 +5,7 @@ import { registerAuditCommand } from './commands/audit'
 import { registerCleanupCommand } from './commands/cleanup'
 import { registerConfigCommand } from './commands/config'
 import { registerDownloadCommand } from './commands/download'
+import { registerEnrichMetadataCommand } from './commands/enrich-metadata'
 import { registerDoctorCommand } from './commands/doctor'
 import { registerOrganizeCommand } from './commands/organize'
 import { registerPdf2CbzCommand } from './commands/pdf2cbz'
@@ -19,6 +20,7 @@ program.enablePositionalOptions()
  */
 function configureCli(): void {
   registerDownloadCommand(program)
+  registerEnrichMetadataCommand(program)
   registerAuditCommand(program)
   registerCleanupCommand(program)
   registerConfigCommand(program)

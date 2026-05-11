@@ -21,6 +21,7 @@ describe('resolveConfig', () => {
       cachePath: undefined,
       failureReportPath: undefined,
       metadataPath: undefined,
+      enrichedMetadataPath: undefined,
       flatConflictResolution: undefined,
       hasConfiguredLibraries: false,
       routes: [],
@@ -44,6 +45,9 @@ describe('resolveConfig', () => {
       scanPaths: ['My Library', 'Existing Library'],
       cachePath: 'shared-cache.json',
       metadataPath: 'metadata.json',
+      enrichedMetadataPath: 'enriched.json',
+      archiveRoot: 'Archive',
+      layout: 'flat',
       flatConflictResolution: 'prefer-known-md5-then-largest',
       troveOnly: true,
       showProgress: true,
@@ -52,6 +56,7 @@ describe('resolveConfig', () => {
       extInclude: ['pdf', 'mobi'],
       extExclude: ['zip'],
       formatPriority: ['cbz', 'epub'],
+      archiveFormats: ['PDF', 'EPUB'],
       purchaseKeys: ['key1', 'key2'],
       offlineAudit: true,
     })
@@ -64,18 +69,21 @@ describe('resolveConfig', () => {
       scanLibraries: [
         {
           path: 'My Library',
-          layout: 'bundle',
+          layout: 'flat',
           formatPriority: ['cbz', 'epub'],
         },
         {
           path: 'Existing Library',
-          layout: 'bundle',
+          layout: 'flat',
           formatPriority: ['cbz', 'epub'],
         },
       ],
       cachePath: 'shared-cache.json',
       failureReportPath: undefined,
       metadataPath: 'metadata.json',
+      enrichedMetadataPath: 'enriched.json',
+      archiveRoot: 'Archive',
+      layout: 'flat',
       flatConflictResolution: 'prefer-known-md5-then-largest',
       hasConfiguredLibraries: false,
       routes: [],
@@ -86,6 +94,7 @@ describe('resolveConfig', () => {
       extInclude: ['pdf', 'mobi'],
       extExclude: ['zip'],
       formatPriority: ['cbz', 'epub'],
+      archiveFormats: ['pdf', 'epub'],
       purchaseKeys: ['key1', 'key2'],
       offlineAudit: true,
     })
@@ -121,12 +130,14 @@ describe('resolveConfig', () => {
       cachePath: 'cache.json',
       failureReportPath: 'failures.json',
       metadataPath: 'metadata.json',
+      enrichedMetadataPath: 'enriched.json',
       routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
       libraries: {
         comics: {
           path: 'Comics',
           layout: 'flat',
           formatPriority: ['cbz', 'pdf'],
+          archiveFormats: ['pdf', 'epub'],
           extInclude: ['cbz', 'pdf'],
         },
         books: {
@@ -144,11 +155,35 @@ describe('resolveConfig', () => {
       cachePath: 'cache.json',
       failureReportPath: 'failures.json',
       metadataPath: 'metadata.json',
+      enrichedMetadataPath: 'enriched.json',
       hasConfiguredLibraries: true,
       routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
       formatPriority: ['epub', 'pdf', 'mobi'],
       extInclude: ['epub', 'pdf', 'mobi'],
     })
+    expect(config.scanLibraries.find((library) => library.name === 'comics')?.layout).toBe('flat')
+    expect(
+      config.scanLibraries.find((library) => library.name === 'comics')?.archiveFormats
+    ).toEqual(['pdf', 'epub'])
+    expect(config.scanLibraries.find((library) => library.name === 'books')?.layout).toBe('bundle')
+  })
+
+  it('uses root layout as a default while allowing library overrides', () => {
+    const config = resolveConfig({
+      defaultLibrary: 'comics',
+      layout: 'flat',
+      libraries: {
+        comics: {
+          path: 'Comics',
+        },
+        books: {
+          path: 'Books',
+          layout: 'bundle',
+        },
+      },
+    })
+
+    expect(config.layout).toBe('flat')
     expect(config.scanLibraries.find((library) => library.name === 'comics')?.layout).toBe('flat')
     expect(config.scanLibraries.find((library) => library.name === 'books')?.layout).toBe('bundle')
   })

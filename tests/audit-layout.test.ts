@@ -511,6 +511,67 @@ describe('auditLibrary layout detection', () => {
     }
   })
 
+  it('audits the preferred archive alternate from the mirrored archive root without main cache keys', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
+
+    try {
+      const mediaRoot = path.join(temporaryRoot, 'Media')
+      const comicsPath = path.join(mediaRoot, 'Comics', 'comics')
+      const archiveRoot = path.join(temporaryRoot, 'Media Archive')
+      const archiveFolder = buildProductFolder(
+        path.join(archiveRoot, 'Comics', 'comics'),
+        'Humble Comics Bundle: Example',
+        'Product'
+      )
+      const cachePath = path.join(mediaRoot, '.hbd', 'cache.json')
+      await mkdir(archiveFolder, { recursive: true })
+      await writeFile(path.join(archiveFolder, 'issue.pdf'), 'pdf archive')
+      await writeFile(path.join(archiveFolder, 'issue.epub'), 'epub archive')
+
+      const summary = await auditLibrary({
+        client: createSingleProductClient('Humble Comics Bundle: Example', [
+          'issue.cbz',
+          'issue.pdf',
+          'issue.epub',
+        ]),
+        config: resolveConfig({
+          mediaRoot,
+          archiveRoot,
+          defaultLibrary: 'comics',
+          cachePath,
+          sessionAuth: 'session',
+          purchaseKeys: ['order-1'],
+          offlineAudit: true,
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              archiveFormats: ['pdf', 'epub'],
+              extInclude: ['cbz', 'pdf', 'epub'],
+            },
+          },
+        }),
+      })
+
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as
+        | Record<string, unknown>
+        | undefined
+
+      expect(summary).toMatchObject({
+        selectedCandidates: 2,
+        matchedFiles: 1,
+      })
+      expect(cache?.['archive:order-1:issue.pdf']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache?.['archive:order-1:issue.epub']).toBeUndefined()
+      expect(cache?.['order-1:issue.pdf']).toBeUndefined()
+      expect(cache?.['order-1:issue.epub']).toBeUndefined()
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('uses the routed library format priority when matching cross-library files', async () => {
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-audit-layout-'))
 

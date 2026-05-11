@@ -11,6 +11,7 @@ import {
   buildProductFolder,
   buildTroveFolder,
   cleanName,
+  collectPublisherFolderCandidates,
   findExistingPublisherFolders,
   inferPublisherFocusedFolder,
   inferPublisherFolder,
@@ -21,11 +22,13 @@ import {
   hasSimilarTitle,
 } from '../utils/fs'
 import {
+  findPdfCbzEntryByCbzPath,
   loadCache,
   saveCache,
   upsertFlatIndexEntry,
   type CacheData,
   type CacheEntry,
+  type PdfCbzCacheEntry,
   type FlatIndexEntry,
 } from './cache'
 import {
@@ -103,6 +106,7 @@ export type AuditSummary = {
 export type DownloadInspectionItem = {
   cacheKey: string
   flatCacheKey?: string
+  isArchive?: boolean
   filename: string
   platform: string
   url: string
@@ -116,6 +120,7 @@ export type DownloadInspectionItem = {
   expectedMd5?: string
   localPath?: string
   cacheEntry?: CacheEntry
+  transformEntry?: PdfCbzCacheEntry
   routing: CandidateRoutingDecision
 }
 
@@ -174,6 +179,11 @@ export type RoutedDownloadCandidate = {
   candidate: WebDownloadCandidate
   library: ScanLibraryConfig
   routing: CandidateRoutingDecision
+}
+
+type ArchiveDownloadCandidate = RoutedDownloadCandidate & {
+  archiveLibrary: ScanLibraryConfig
+  archiveCacheKey: string
 }
 
 function sleep(ms: number): Promise<void> {
@@ -478,6 +488,7 @@ type CandidateRouteContext = {
   bundleTitle: string
   productTitle: string
   publisherMediaScores?: Map<string, MediaScore>
+  publisherFolderCandidates?: string[]
 }
 
 const mediaKinds: MediaKind[] = ['books', 'comics', 'manga']
@@ -516,9 +527,13 @@ function isInstructionalArtText(value: string): boolean {
   )
 }
 
-export function publisherMediaScoreKey(bundleTitle: string): string {
+export function publisherMediaScoreKey(
+  bundleTitle: string,
+  publisherFolderCandidates: string[] = []
+): string {
   return normalizePublisherFamilyKey(
-    inferPublisherFocusedFolder(bundleTitle) ?? inferPublisherFolder(bundleTitle)
+    inferPublisherFocusedFolder(bundleTitle) ??
+      inferPublisherFolder(bundleTitle, publisherFolderCandidates)
   )
 }
 
@@ -533,8 +548,14 @@ function classifyMedia(
   const filename = normalizedRouteText(candidate.filename)
   const combinedProductText = `${productTitle} ${filename}`
   const extension = getExtension(candidate.filename)
-  const publisherFolder = inferPublisherFolder(context.bundleTitle)
-  const publisherScoreKey = publisherMediaScoreKey(context.bundleTitle)
+  const publisherFolder = inferPublisherFolder(
+    context.bundleTitle,
+    context.publisherFolderCandidates
+  )
+  const publisherScoreKey = publisherMediaScoreKey(
+    context.bundleTitle,
+    context.publisherFolderCandidates
+  )
 
   if (/\bmanga\s+bundle\b/i.test(bundleTitle)) {
     addMediaScore(scores, signals, 'manga', 16, 'manga-bundle')
@@ -657,7 +678,8 @@ function classifyMedia(
 }
 
 function scoreMetadataDownloadMedia(
-  order: Pick<MetadataOrder, 'bundleTitle' | 'products'>
+  order: Pick<MetadataOrder, 'bundleTitle' | 'products'>,
+  publisherFolderCandidates: string[] = []
 ): MediaScore {
   const scores = emptyMediaScore()
   for (const product of order.products) {
@@ -671,6 +693,7 @@ function scoreMetadataDownloadMedia(
         {
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
+          publisherFolderCandidates,
         }
       )
       for (const media of mediaKinds) {
@@ -682,13 +705,14 @@ function scoreMetadataDownloadMedia(
 }
 
 export function buildPublisherMediaScores(
-  orders: Array<Pick<MetadataOrder, 'bundleTitle' | 'products'>>
+  orders: Array<Pick<MetadataOrder, 'bundleTitle' | 'products'>>,
+  publisherFolderCandidates: string[] = []
 ): Map<string, MediaScore> {
   const scoresByPublisher = new Map<string, MediaScore>()
   for (const order of orders) {
-    const publisherKey = publisherMediaScoreKey(order.bundleTitle)
+    const publisherKey = publisherMediaScoreKey(order.bundleTitle, publisherFolderCandidates)
     const scores = scoresByPublisher.get(publisherKey) ?? emptyMediaScore()
-    const orderScores = scoreMetadataDownloadMedia(order)
+    const orderScores = scoreMetadataDownloadMedia(order, publisherFolderCandidates)
     for (const media of mediaKinds) {
       scores[media] += orderScores[media]
     }
@@ -1037,6 +1061,131 @@ export function selectRoutedDownloadCandidates(
   )
 }
 
+function libraryKey(library: ScanLibraryConfig): string {
+  return library.name ?? library.path
+}
+
+function didSelectPreferredFormat(selected: RoutedDownloadCandidate[]): boolean {
+  const first = selected[0]
+  if (!first) {
+    return false
+  }
+  const priority = first.library.formatPriority ?? []
+  if (priority.length === 0) {
+    return false
+  }
+  return selected.some(({ candidate }) => priority.includes(getExtension(candidate.filename)))
+}
+
+export function getArchiveLibraryPath(
+  config: AppConfig,
+  library: ScanLibraryConfig
+): string | undefined {
+  if (!config.archiveRoot) {
+    return undefined
+  }
+
+  const mediaRoot = config.mediaRoot ? path.resolve(config.mediaRoot) : undefined
+  const libraryPath = path.resolve(library.path)
+  const relativeLibraryPath = mediaRoot
+    ? path.relative(mediaRoot, libraryPath)
+    : path.isAbsolute(library.path)
+      ? path.basename(library.path)
+      : library.path
+  if (
+    !relativeLibraryPath ||
+    relativeLibraryPath.startsWith('..') ||
+    path.isAbsolute(relativeLibraryPath)
+  ) {
+    return path.join(config.archiveRoot, path.basename(library.path))
+  }
+  return path.join(config.archiveRoot, relativeLibraryPath)
+}
+
+function getArchiveLibrary(
+  config: AppConfig,
+  library: ScanLibraryConfig
+): ScanLibraryConfig | undefined {
+  if (!config.archiveRoot || !library.archiveFormats || library.archiveFormats.length === 0) {
+    return undefined
+  }
+  const archivePath = getArchiveLibraryPath(config, library)
+  if (!archivePath) {
+    return undefined
+  }
+  return {
+    ...library,
+    path: archivePath,
+  }
+}
+
+function plannedDownloadKey(destination: string): string {
+  return path.resolve(destination).toLowerCase()
+}
+
+export function buildArchiveCacheKey(orderId: string, filename: string): string {
+  return `archive:${orderId}:${filename}`
+}
+
+export function selectArchiveDownloadCandidates(
+  candidates: WebDownloadCandidate[],
+  selectedPrimaryCandidates: RoutedDownloadCandidate[],
+  config: AppConfig,
+  context: CandidateRouteContext,
+  orderId = ''
+): ArchiveDownloadCandidate[] {
+  const firstPrimary = selectedPrimaryCandidates[0]
+  if (!firstPrimary || !didSelectPreferredFormat(selectedPrimaryCandidates)) {
+    return []
+  }
+
+  const archiveLibrary = getArchiveLibrary(config, firstPrimary.library)
+  const archiveFormats = firstPrimary.library.archiveFormats ?? []
+  if (!archiveLibrary || archiveFormats.length === 0) {
+    return []
+  }
+  const archiveFormatSet = new Set(archiveFormats)
+
+  const primaryLibraryKey = libraryKey(firstPrimary.library)
+  const primaryExtensions = new Set(
+    selectedPrimaryCandidates.map(({ candidate }) => getExtension(candidate.filename))
+  )
+  const primaryFilenames = new Set(
+    selectedPrimaryCandidates.map(({ candidate }) => candidate.filename.toLowerCase())
+  )
+
+  const archiveCandidates = candidates
+    .map((candidate) => {
+      const decision = routeDownloadCandidate(candidate, context, config)
+      return decision ? { candidate, ...decision } : undefined
+    })
+    .filter((candidate): candidate is RoutedDownloadCandidate => candidate !== undefined)
+    .filter(({ candidate, library }) => {
+      const extension = getExtension(candidate.filename)
+      return (
+        libraryKey(library) === primaryLibraryKey &&
+        archiveFormatSet.has(extension) &&
+        !primaryExtensions.has(extension) &&
+        !primaryFilenames.has(candidate.filename.toLowerCase())
+      )
+    })
+
+  for (const archiveFormat of archiveFormats) {
+    const matches = archiveCandidates.filter(
+      ({ candidate }) => getExtension(candidate.filename) === archiveFormat
+    )
+    if (matches.length > 0) {
+      return matches.map((candidate) => ({
+        ...candidate,
+        archiveLibrary,
+        archiveCacheKey: buildArchiveCacheKey(orderId, candidate.candidate.filename),
+      }))
+    }
+  }
+
+  return []
+}
+
 function getFilenameFromUrl(url: string): string {
   const withoutQuery = url.split('?')[0] ?? url
   const parts = withoutQuery.split('/')
@@ -1304,12 +1453,16 @@ export async function downloadLibrary({
   const metadataPath = metadata
     ? resolveMetadataPath(config.libraryPath, config.metadataPath)
     : undefined
+  const publisherFolderCandidates = await collectPublisherFolderCandidates(config.scanLibraries)
   const publisherMediaScores = metadata
-    ? buildPublisherMediaScores(Object.values(metadata.orders))
+    ? buildPublisherMediaScores(Object.values(metadata.orders), publisherFolderCandidates)
     : undefined
   const scanPaths = getScanPaths(config)
   emitProgress(onProgress, 'Indexing local files...')
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
+  const archiveDirectoryIndex = config.archiveRoot
+    ? await buildLocalDirectoryIndex([config.archiveRoot])
+    : undefined
   emitProgress(onProgress, 'Loading Humble library metadata...')
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -1322,6 +1475,7 @@ export async function downloadLibrary({
 
   const items: DownloadItem[] = []
   const plannedFlatDownloadItems = new Map<string, DownloadItem>()
+  const plannedArchiveDownloadItems = new Map<string, DownloadItem>()
   let locallySatisfied = 0
   let metadataUpdatesSinceSave = 0
 
@@ -1466,14 +1620,30 @@ export async function downloadLibrary({
           bundleTitle,
           productTitle: product.human_name,
           publisherMediaScores,
+          publisherFolderCandidates,
         })
+        const archiveCandidates = selectArchiveDownloadCandidates(
+          webCandidates,
+          selectedCandidates,
+          config,
+          {
+            bundleTitle,
+            productTitle: product.human_name,
+            publisherMediaScores,
+            publisherFolderCandidates,
+          },
+          orderId
+        )
         for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
           const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
           const cacheEntry = cache[cacheKey] ?? (flatCacheKey ? cache[flatCacheKey] : undefined)
           const publisherFolder =
             library.layout === 'flat'
-              ? await resolvePublisherFolder(library.path, inferPublisherFolder(bundleTitle))
+              ? await resolvePublisherFolder(
+                  library.path,
+                  inferPublisherFolder(bundleTitle, publisherFolderCandidates)
+                )
               : undefined
           const expectedDestination = path.join(
             buildLibraryProductFolder(library, bundleTitle, product.human_name, publisherFolder),
@@ -1531,6 +1701,7 @@ export async function downloadLibrary({
               bundleTitle,
               product.human_name,
               inferredBundleFolder?.path,
+              publisherFolderCandidates,
               candidate.filename
             ),
             candidate.filename,
@@ -1541,10 +1712,13 @@ export async function downloadLibrary({
           )
           if (localPath) {
             locallySatisfied += 1
-            cache[cacheKey] = {
-              urlLastModified: new Date().toUTCString(),
+            const transformEntry = findPdfCbzEntryByCbzPath(cache, localPath)
+            if (!transformEntry) {
+              cache[cacheKey] = {
+                urlLastModified: new Date().toUTCString(),
+              }
             }
-            if (flatCacheKey) {
+            if (flatCacheKey && !transformEntry) {
               cache[flatCacheKey] = cache[cacheKey]
               upsertFlatIndexEntry(
                 cache,
@@ -1591,6 +1765,80 @@ export async function downloadLibrary({
           if (flatCacheKey) {
             plannedFlatDownloadItems.set(flatCacheKey, item)
           }
+        }
+        for (const { candidate, archiveLibrary, archiveCacheKey } of archiveCandidates) {
+          const cacheEntry = cache[archiveCacheKey]
+          const publisherFolder =
+            archiveLibrary.layout === 'flat'
+              ? await resolvePublisherFolder(
+                  archiveLibrary.path,
+                  inferPublisherFolder(bundleTitle, publisherFolderCandidates)
+                )
+              : undefined
+          const expectedDestination = path.join(
+            buildLibraryProductFolder(
+              archiveLibrary,
+              bundleTitle,
+              product.human_name,
+              publisherFolder
+            ),
+            candidate.filename
+          )
+          const archivePlanKey =
+            archiveLibrary.layout === 'flat'
+              ? (buildFlatCacheKey(archiveLibrary, product.human_name, candidate.filename) ??
+                plannedDownloadKey(expectedDestination))
+              : plannedDownloadKey(expectedDestination)
+          const plannedArchiveDownloadItem = plannedArchiveDownloadItems.get(archivePlanKey)
+          if (plannedArchiveDownloadItem && !config.updateOnly) {
+            plannedArchiveDownloadItem.additionalCacheKeys = [
+              ...(plannedArchiveDownloadItem.additionalCacheKeys ?? []),
+              archiveCacheKey,
+            ]
+            continue
+          }
+          if (cacheEntry && !config.updateOnly) {
+            continue
+          }
+          const localPath = archiveDirectoryIndex
+            ? await findAuditFile(
+                await buildAuditCandidatePaths(
+                  [archiveLibrary.path],
+                  bundleTitle,
+                  product.human_name,
+                  undefined,
+                  publisherFolderCandidates,
+                  candidate.filename
+                ),
+                candidate.filename,
+                config,
+                archiveDirectoryIndex,
+                undefined,
+                archiveLibrary,
+                { allowEquivalentFormats: false }
+              )
+            : undefined
+          if (localPath) {
+            locallySatisfied += 1
+            cache[archiveCacheKey] = {
+              urlLastModified: new Date().toUTCString(),
+            }
+            continue
+          }
+          const item: DownloadItem = {
+            url: candidate.url,
+            destination: expectedDestination,
+            label: candidate.filename,
+            orderId,
+            bundleTitle,
+            productTitle: product.human_name,
+            expectedSize: candidate.fileSize,
+            expectedMd5: candidate.md5,
+            cacheKey: archiveCacheKey,
+            cacheEntry,
+          }
+          items.push(item)
+          plannedArchiveDownloadItems.set(archivePlanKey, item)
         }
       }
     }
@@ -1691,11 +1939,15 @@ export async function inspectDownloadState({
   const scanPaths = getScanPaths(config)
   emitProgress(onProgress, 'Indexing local files...')
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
+  const archiveDirectoryIndex = config.archiveRoot
+    ? await buildLocalDirectoryIndex([config.archiveRoot])
+    : undefined
   const metadata: MetadataData | undefined = config.troveOnly
     ? undefined
     : await loadMetadata(config.libraryPath, config.metadataPath)
+  const publisherFolderCandidates = await collectPublisherFolderCandidates(config.scanLibraries)
   const publisherMediaScores = metadata
-    ? buildPublisherMediaScores(Object.values(metadata.orders))
+    ? buildPublisherMediaScores(Object.values(metadata.orders), publisherFolderCandidates)
     : undefined
   emitProgress(onProgress, 'Loading Humble library metadata...')
   const purchaseKeys =
@@ -1753,13 +2005,29 @@ export async function inspectDownloadState({
         bundleTitle,
         productTitle: product.human_name,
         publisherMediaScores,
+        publisherFolderCandidates,
       })
+      const archiveCandidates = selectArchiveDownloadCandidates(
+        webCandidates,
+        selectedCandidates,
+        config,
+        {
+          bundleTitle,
+          productTitle: product.human_name,
+          publisherMediaScores,
+          publisherFolderCandidates,
+        },
+        orderId
+      )
       for (const { candidate, library, routing } of selectedCandidates) {
         const cacheKey = `${orderId}:${candidate.filename}`
         const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
         const publisherFolder =
           library.layout === 'flat'
-            ? await resolvePublisherFolder(library.path, inferPublisherFolder(bundleTitle))
+            ? await resolvePublisherFolder(
+                library.path,
+                inferPublisherFolder(bundleTitle, publisherFolderCandidates)
+              )
             : undefined
         const expectedDestination = path.join(
           buildLibraryProductFolder(library, bundleTitle, product.human_name, publisherFolder),
@@ -1771,6 +2039,7 @@ export async function inspectDownloadState({
             bundleTitle,
             product.human_name,
             inferredBundleFolder?.path,
+            publisherFolderCandidates,
             candidate.filename
           ),
           candidate.filename,
@@ -1779,6 +2048,7 @@ export async function inspectDownloadState({
           inferredBundleFolder,
           routing.fallback ? undefined : library
         )
+        const transformEntry = localPath ? findPdfCbzEntryByCbzPath(cache, localPath) : undefined
 
         inspection.candidates.push({
           cacheKey,
@@ -1796,6 +2066,62 @@ export async function inspectDownloadState({
           expectedMd5: candidate.md5,
           localPath,
           cacheEntry: cache[cacheKey] ?? (flatCacheKey ? cache[flatCacheKey] : undefined),
+          transformEntry,
+          routing,
+        })
+      }
+      for (const { candidate, archiveLibrary, archiveCacheKey, routing } of archiveCandidates) {
+        const publisherFolder =
+          archiveLibrary.layout === 'flat'
+            ? await resolvePublisherFolder(
+                archiveLibrary.path,
+                inferPublisherFolder(bundleTitle, publisherFolderCandidates)
+              )
+            : undefined
+        const expectedDestination = path.join(
+          buildLibraryProductFolder(
+            archiveLibrary,
+            bundleTitle,
+            product.human_name,
+            publisherFolder
+          ),
+          candidate.filename
+        )
+        const localPath = archiveDirectoryIndex
+          ? await findAuditFile(
+              await buildAuditCandidatePaths(
+                [archiveLibrary.path],
+                bundleTitle,
+                product.human_name,
+                undefined,
+                publisherFolderCandidates,
+                candidate.filename
+              ),
+              candidate.filename,
+              config,
+              archiveDirectoryIndex,
+              undefined,
+              archiveLibrary,
+              { allowEquivalentFormats: false }
+            )
+          : undefined
+
+        inspection.candidates.push({
+          cacheKey: archiveCacheKey,
+          isArchive: true,
+          filename: candidate.filename,
+          platform: candidate.platform,
+          url: candidate.url,
+          orderId,
+          bundleTitle,
+          productTitle: product.human_name,
+          expectedLibraryName: archiveLibrary.name ? `${archiveLibrary.name} archive` : 'archive',
+          expectedLibraryPath: archiveLibrary.path,
+          expectedDestination,
+          expectedSize: candidate.fileSize,
+          expectedMd5: candidate.md5,
+          localPath,
+          cacheEntry: cache[archiveCacheKey],
           routing,
         })
       }
@@ -1914,6 +2240,7 @@ export async function buildAuditCandidatePaths(
   bundleTitle: string,
   productTitle: string,
   inferredBundleFolder: string | undefined,
+  publisherFolderCandidates: string[] = [],
   ...segments: string[]
 ): Promise<string[]> {
   const paths: string[] = []
@@ -1928,7 +2255,7 @@ export async function buildAuditCandidatePaths(
     const productFolder =
       (await findExistingDirectory(bundleFolder, productTitle)) ??
       buildProductFolder(libraryPath, bundleTitle, productTitle)
-    const inferredPublisherFolder = inferPublisherFolder(bundleTitle)
+    const inferredPublisherFolder = inferPublisherFolder(bundleTitle, publisherFolderCandidates)
     const flatProductFolders = [
       ...(await findExistingPublisherFolders(libraryPath, inferredPublisherFolder)),
       inferredPublisherFolder,
@@ -2238,12 +2565,16 @@ export async function auditLibrary({
   const metadata: MetadataData | undefined = config.troveOnly
     ? undefined
     : await loadMetadata(config.libraryPath, config.metadataPath)
+  const publisherFolderCandidates = await collectPublisherFolderCandidates(config.scanLibraries)
   const publisherMediaScores = metadata
-    ? buildPublisherMediaScores(Object.values(metadata.orders))
+    ? buildPublisherMediaScores(Object.values(metadata.orders), publisherFolderCandidates)
     : undefined
   emitProgress(onProgress, 'Indexing local files...')
   const scanPaths = getScanPaths(config)
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
+  const archiveDirectoryIndex = config.archiveRoot
+    ? await buildLocalDirectoryIndex([config.archiveRoot])
+    : undefined
   emitProgress(onProgress, 'Loading Humble library metadata...')
   const purchaseKeys =
     config.purchaseKeys && config.purchaseKeys.length > 0
@@ -2382,6 +2713,7 @@ export async function auditLibrary({
                   bundleTitle,
                   product.human_name,
                   inferredBundleFolder?.path,
+                  publisherFolderCandidates,
                   gameName
                 )
               )
@@ -2447,8 +2779,21 @@ export async function auditLibrary({
           bundleTitle,
           productTitle: product.human_name,
           publisherMediaScores,
+          publisherFolderCandidates,
         })
-        summary.selectedCandidates += selectedCandidates.length
+        const archiveCandidates = selectArchiveDownloadCandidates(
+          webCandidates,
+          selectedCandidates,
+          config,
+          {
+            bundleTitle,
+            productTitle: product.human_name,
+            publisherMediaScores,
+            publisherFolderCandidates,
+          },
+          orderId
+        )
+        summary.selectedCandidates += selectedCandidates.length + archiveCandidates.length
         for (const { candidate, library, routing } of selectedCandidates) {
           const cacheKey = `${orderId}:${candidate.filename}`
           const flatCacheKey = buildFlatCacheKey(library, product.human_name, candidate.filename)
@@ -2458,6 +2803,7 @@ export async function auditLibrary({
               bundleTitle,
               product.human_name,
               inferredBundleFolder?.path,
+              publisherFolderCandidates,
               candidate.filename
             ),
             candidate.filename,
@@ -2491,6 +2837,37 @@ export async function auditLibrary({
                 canonicalPath: localPath,
               })
             )
+          }
+        }
+        for (const { candidate, archiveLibrary, archiveCacheKey } of archiveCandidates) {
+          const localPath = archiveDirectoryIndex
+            ? await findAuditFile(
+                await buildAuditCandidatePaths(
+                  [archiveLibrary.path],
+                  bundleTitle,
+                  product.human_name,
+                  undefined,
+                  publisherFolderCandidates,
+                  candidate.filename
+                ),
+                candidate.filename,
+                config,
+                archiveDirectoryIndex,
+                undefined,
+                archiveLibrary,
+                { allowEquivalentFormats: false }
+              )
+            : undefined
+          if (!localPath) {
+            continue
+          }
+          summary.matchedFiles += 1
+          const lastModified = config.offlineAudit
+            ? undefined
+            : await fetchLastModified(client, candidate.url)
+
+          cache[archiveCacheKey] = {
+            urlLastModified: lastModified ?? now,
           }
         }
       }

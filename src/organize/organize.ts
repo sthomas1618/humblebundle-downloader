@@ -31,12 +31,27 @@ import {
   type RoutedDownloadCandidate,
   type WebDownloadCandidate,
 } from '../download/downloader'
-import { loadCache, saveCache, upsertFlatIndexEntry, type FlatIndexEntry } from '../download/cache'
+import {
+  findPdfCbzEntryByCbzPath,
+  loadCache,
+  saveCache,
+  upsertFlatIndexEntry,
+  type CacheData,
+  type FlatIndexEntry,
+} from '../download/cache'
+import {
+  getEnrichedPublisherForProduct,
+  loadEnrichedMetadata,
+  type EnrichedMetadataData,
+} from '../download/enriched-metadata'
 import { loadMetadata } from '../download/metadata'
 import {
   buildProductFolder,
   buildLibraryProductFolder,
+  canonicalPublisherFolderName,
   cleanName,
+  collectPublisherFolderCandidates,
+  findExistingPublisherFolders,
   hasSimilarTitle,
   inferPublisherFocusedFolder,
   inferPublisherFolder,
@@ -68,6 +83,12 @@ export type OrganizeActionStatus =
 type ConflictResolutionAction = 'remove-source' | 'replace-destination' | 'quarantine-source'
 
 type PlannedDestinationRegistry = Map<string, OrganizeAction>
+
+type FlatPublisherSelection = {
+  folder: string
+  source: 'enriched' | 'inferred'
+  dominantEnriched: boolean
+}
 
 export type OrganizeAction = {
   cacheKey: string
@@ -130,6 +151,8 @@ export type OrganizeOptions = {
   resolveConflicts?: ConflictResolutionMode
   conflictDir?: string
   reportPath?: string
+  useEnrichedMetadata?: boolean
+  enrichedMetadataPath?: string
   onProgress?: (message: string) => void
 }
 
@@ -143,6 +166,27 @@ function samePathExact(left: string, right: string): boolean {
 
 function getExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function configWithFlatOverride(config: AppConfig, forceFlat: boolean): AppConfig {
+  if (!forceFlat) {
+    return config
+  }
+  return {
+    ...config,
+    scanLibraries: config.scanLibraries.map((library) => ({
+      ...library,
+      layout: 'flat',
+    })),
+  }
+}
+
+function isLibraryFlat(library: ScanLibraryConfig): boolean {
+  return library.layout === 'flat'
+}
+
+function hasFlatLibraries(config: AppConfig): boolean {
+  return config.scanLibraries.some((library) => isLibraryFlat(library))
 }
 
 const mediaKinds: MediaKind[] = ['books', 'comics', 'manga']
@@ -182,6 +226,135 @@ function topLevelDirectoryName(rootPath: string, candidatePath: string): string 
 
 function isHumbleBundleFolder(folderName: string | undefined): boolean {
   return folderName?.toLowerCase().startsWith('humble ') ?? false
+}
+
+function isGenericPublisherFolder(folderName: string | undefined): boolean {
+  if (!folderName) {
+    return true
+  }
+  const familyKey = normalizePublisherFamilyKey(folderName)
+  return !familyKey || familyKey === 'humble' || folderName.toLowerCase() === 'humble'
+}
+
+function publisherFamilyKeyAppearsInTitle(publisherFolder: string, title: string): boolean {
+  const publisherFamilyKey = normalizePublisherFamilyKey(publisherFolder)
+  if (!publisherFamilyKey || publisherFamilyKey === 'humble') {
+    return false
+  }
+  const titleKey = normalizeFlatProductKey(title)
+  return publisherFamilyKey
+    .split(' ')
+    .filter((token) => token.length >= 3)
+    .every((token) => titleKey.split(' ').includes(token))
+}
+
+function isWeakFlatPublisherSource({
+  sourceFolder,
+  bundleTitle,
+  productTitle,
+}: {
+  sourceFolder?: string
+  bundleTitle: string
+  productTitle: string
+}): boolean {
+  if (isGenericPublisherFolder(sourceFolder) || isHumbleBundleFolder(sourceFolder)) {
+    return true
+  }
+  if (sourceFolder && hasSimilarTitle(sourceFolder, bundleTitle)) {
+    return true
+  }
+  if (sourceFolder && publisherFamilyKeyAppearsInTitle(sourceFolder, productTitle)) {
+    return true
+  }
+  return /\b(?:anniversary|showcase|spotlight|party|mega\s*bundle|megabundle|collection)\b/i.test(
+    bundleTitle
+  )
+}
+
+function chooseFlatPublisherCandidate({
+  selection,
+  bundleTitle,
+  productTitle,
+  sourcePath,
+  libraryPath,
+  publisherFolderCandidates,
+}: {
+  selection?: FlatPublisherSelection
+  bundleTitle: string
+  productTitle: string
+  sourcePath?: string
+  libraryPath: string
+  publisherFolderCandidates?: string[]
+}): string | undefined {
+  const inferredFolder = inferPublisherFolder(bundleTitle, publisherFolderCandidates)
+  const sourceFolder = sourcePath ? topLevelDirectoryName(libraryPath, sourcePath) : undefined
+  const selectedFolder = selection?.folder ?? inferredFolder
+  const selectedFamily = normalizePublisherFamilyKey(selectedFolder)
+  const inferredFamily = normalizePublisherFamilyKey(inferredFolder)
+  const sourceFamily = normalizePublisherFamilyKey(sourceFolder ?? '')
+
+  if (!selection || selection.source !== 'enriched' || selectedFamily === inferredFamily) {
+    return selectedFolder
+  }
+  if (isGenericPublisherFolder(inferredFolder) && isGenericPublisherFolder(sourceFolder)) {
+    return selectedFolder
+  }
+  if (
+    sourceFolder &&
+    sourceFamily &&
+    sourceFamily !== 'humble' &&
+    sourceFamily !== selectedFamily
+  ) {
+    if (
+      sourceFamily === inferredFamily &&
+      !publisherFamilyKeyAppearsInTitle(sourceFolder, productTitle)
+    ) {
+      return sourceFolder
+    }
+    if (!isWeakFlatPublisherSource({ sourceFolder, bundleTitle, productTitle })) {
+      return sourceFolder
+    }
+  }
+  if (inferredFamily && inferredFamily !== 'humble' && inferredFamily !== selectedFamily) {
+    if (publisherFamilyKeyAppearsInTitle(inferredFolder, productTitle)) {
+      return selectedFolder
+    }
+    return selection.dominantEnriched ? selectedFolder : inferredFolder
+  }
+  return selectedFolder
+}
+
+async function resolveFlatPublisherFolder({
+  libraryPath,
+  selection,
+  bundleTitle,
+  productTitle,
+  sourcePath,
+  publisherFolderCandidates,
+}: {
+  libraryPath: string
+  selection?: FlatPublisherSelection
+  bundleTitle: string
+  productTitle: string
+  sourcePath?: string
+  publisherFolderCandidates?: string[]
+}): Promise<string | undefined> {
+  const candidate = chooseFlatPublisherCandidate({
+    selection,
+    bundleTitle,
+    productTitle,
+    sourcePath,
+    libraryPath,
+    publisherFolderCandidates,
+  })
+  if (!candidate) {
+    return undefined
+  }
+  const existingPublisherFolders = await findExistingPublisherFolders(libraryPath, candidate)
+  if (existingPublisherFolders[0]) {
+    return existingPublisherFolders[0]
+  }
+  return selection?.source === 'enriched' ? canonicalPublisherFolderName(candidate) : candidate
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -725,16 +898,22 @@ function metadataCandidate(download: {
 }
 
 function buildPublisherFoldersByProduct(
-  orders: Array<{ bundleTitle: string; products: Array<{ productTitle: string }> }>
-): Map<string, string> {
+  orders: Array<{ bundleTitle: string; products: Array<{ productTitle: string }> }>,
+  enrichedMetadata?: EnrichedMetadataData,
+  publisherFolderCandidates: string[] = []
+): Map<string, FlatPublisherSelection> {
   const publisherVariantsByFamily = new Map<
     string,
     Map<string, { folder: string; count: number }>
   >()
   const inferredPublishersByOrder = new Map<string, { familyKey: string; folder: string }>()
+  const enrichedPublishersByOrder = new Map<
+    string,
+    Map<string, { folder: string; count: number }>
+  >()
 
   for (const order of orders) {
-    const publisherFolder = inferPublisherFolder(order.bundleTitle)
+    const publisherFolder = inferPublisherFolder(order.bundleTitle, publisherFolderCandidates)
     const familyKey = normalizePublisherFamilyKey(publisherFolder)
     const variants = publisherVariantsByFamily.get(familyKey) ?? new Map()
     const variantKey = normalizeFlatPublisherKey(publisherFolder)
@@ -743,6 +922,35 @@ function buildPublisherFoldersByProduct(
     variants.set(variantKey, current)
     publisherVariantsByFamily.set(familyKey, variants)
     inferredPublishersByOrder.set(order.bundleTitle, { familyKey, folder: publisherFolder })
+
+    for (const product of order.products) {
+      const enrichedPublisher = getEnrichedPublisherForProduct(
+        enrichedMetadata,
+        product.productTitle
+      )
+      if (!enrichedPublisher) {
+        continue
+      }
+      const enrichedPublisherKey = normalizePublisherFamilyKey(enrichedPublisher)
+      if (!enrichedPublisherKey || enrichedPublisherKey === 'humble') {
+        continue
+      }
+      const variants = publisherVariantsByFamily.get(enrichedPublisherKey) ?? new Map()
+      const variantKey = normalizeFlatPublisherKey(enrichedPublisher)
+      const currentVariant = variants.get(variantKey) ?? { folder: enrichedPublisher, count: 0 }
+      currentVariant.count += 1
+      variants.set(variantKey, currentVariant)
+      publisherVariantsByFamily.set(enrichedPublisherKey, variants)
+
+      const enrichedPublishers = enrichedPublishersByOrder.get(order.bundleTitle) ?? new Map()
+      const current = enrichedPublishers.get(enrichedPublisherKey) ?? {
+        folder: enrichedPublisher,
+        count: 0,
+      }
+      current.count += 1
+      enrichedPublishers.set(enrichedPublisherKey, current)
+      enrichedPublishersByOrder.set(order.bundleTitle, enrichedPublishers)
+    }
   }
 
   const canonicalPublisherByFamily = new Map<string, string>()
@@ -770,9 +978,32 @@ function buildPublisherFoldersByProduct(
     const publisherKey = inferredPublisher?.familyKey ?? normalizeFlatPublisherKey('humble')
     const publisherFolder =
       (inferredPublisher && canonicalPublisherByFamily.get(inferredPublisher.familyKey)) ?? 'humble'
+    const dominantEnrichedPublisher = dominantPublisherForOrder(
+      enrichedPublishersByOrder.get(order.bundleTitle)
+    )
     for (const product of order.products) {
       const productKey = normalizeFlatProductKey(product.productTitle)
       if (!productKey) {
+        continue
+      }
+      const enrichedPublisher = getEnrichedPublisherForProduct(
+        enrichedMetadata,
+        product.productTitle
+      )
+      if (enrichedPublisher) {
+        const enrichedPublisherKey = normalizePublisherFamilyKey(enrichedPublisher)
+        const publishers = publishersByProduct.get(productKey) ?? new Map()
+        const current = publishers.get(enrichedPublisherKey) ?? {
+          folder: canonicalPublisherByFamily.get(enrichedPublisherKey) ?? enrichedPublisher,
+          count: 0,
+        }
+        current.count +=
+          dominantEnrichedPublisher?.familyKey === enrichedPublisherKey &&
+          dominantEnrichedPublisher.count >= 3
+            ? 5
+            : 3
+        publishers.set(enrichedPublisherKey, current)
+        publishersByProduct.set(productKey, publishers)
         continue
       }
       const publishers = publishersByProduct.get(productKey) ?? new Map()
@@ -783,15 +1014,41 @@ function buildPublisherFoldersByProduct(
     }
   }
 
-  const selectedPublishers = new Map<string, string>()
+  const selectedPublishers = new Map<string, FlatPublisherSelection>()
   for (const [productKey, publishers] of publishersByProduct) {
     const ranked = [...publishers.entries()]
       .filter(([publisherKey]) => publisherKey !== 'humble')
       .sort((left, right) => right[1].count - left[1].count)
-    selectedPublishers.set(productKey, ranked[0]?.[1].folder ?? 'humble')
+    const selected = ranked[0]
+    selectedPublishers.set(productKey, {
+      folder: selected?.[1].folder ?? 'humble',
+      source: selected && selected[1].count >= 3 ? 'enriched' : 'inferred',
+      dominantEnriched: selected ? selected[1].count >= 5 : false,
+    })
   }
 
   return selectedPublishers
+}
+
+function dominantPublisherForOrder(
+  publishers: Map<string, { folder: string; count: number }> | undefined
+): { familyKey: string; folder: string; count: number } | undefined {
+  if (!publishers) {
+    return undefined
+  }
+  const ranked = [...publishers.entries()].sort((left, right) => right[1].count - left[1].count)
+  const [first, second] = ranked
+  if (!first || first[1].count < 3) {
+    return undefined
+  }
+  if (second && first[1].count < second[1].count + 2) {
+    return undefined
+  }
+  return {
+    familyKey: first[0],
+    folder: first[1].folder,
+    count: first[1].count,
+  }
 }
 
 function flatPlannedFileKey(
@@ -862,10 +1119,11 @@ async function planOrganizeAction({
   scanPaths,
   inferredBundleFolder,
   config,
+  cache,
   localDirectoryIndex,
   canonical,
   flat,
-  publisherFolder,
+  publisherSelection,
   orders,
   allBundleTitles,
   resolveConflicts,
@@ -874,6 +1132,7 @@ async function planOrganizeAction({
   plannedDestinations,
   canonicalDuplicateDecisions,
   moveReason,
+  publisherFolderCandidates,
 }: {
   cacheKey: string
   routedCandidate: RoutedDownloadCandidate
@@ -885,10 +1144,11 @@ async function planOrganizeAction({
   scanPaths: string[]
   inferredBundleFolder?: LocalDirectoryIndex['topLevelDirectories'][number]
   config: AppConfig
+  cache: CacheData
   localDirectoryIndex: LocalDirectoryIndex
   canonical: boolean
   flat: boolean
-  publisherFolder?: string
+  publisherSelection?: FlatPublisherSelection
   orders: MetadataOrder[]
   allBundleTitles: string[]
   resolveConflicts: ConflictResolutionMode
@@ -897,6 +1157,7 @@ async function planOrganizeAction({
   plannedDestinations: Set<string>
   canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
   moveReason?: string
+  publisherFolderCandidates: string[]
 }): Promise<OrganizeAction | undefined> {
   const { candidate, library } = routedCandidate
   const destinationLibrary = flat ? { ...library, layout: 'flat' as const } : library
@@ -905,6 +1166,7 @@ async function planOrganizeAction({
     bundleTitle,
     productTitle,
     inferredBundleFolder?.path,
+    publisherFolderCandidates,
     candidate.filename
   )
   const sourcePath = await findAuditFile(
@@ -926,17 +1188,33 @@ async function planOrganizeAction({
   }
 
   const sourceFilename = sourcePath ? path.basename(sourcePath) : undefined
+  const resolvedPublisherFolder =
+    flat && publisherSelection
+      ? await resolveFlatPublisherFolder({
+          libraryPath: library.path,
+          selection: publisherSelection,
+          bundleTitle,
+          productTitle,
+          sourcePath,
+          publisherFolderCandidates,
+        })
+      : publisherSelection?.folder
   const stableSeriesFolder =
-    flat && publisherFolder
+    flat && resolvedPublisherFolder
       ? (sourcePath &&
-          getFlatSeriesFolderFromSource(library.path, publisherFolder, productTitle, sourcePath)) ||
-        (await findExistingFlatSeriesFolder(library.path, publisherFolder, productTitle))
+          getFlatSeriesFolderFromSource(
+            library.path,
+            resolvedPublisherFolder,
+            productTitle,
+            sourcePath
+          )) ||
+        (await findExistingFlatSeriesFolder(library.path, resolvedPublisherFolder, productTitle))
       : undefined
   const productFolder = buildLibraryProductFolder(
     destinationLibrary,
     bundleTitle,
     productTitle,
-    publisherFolder,
+    resolvedPublisherFolder,
     stableSeriesFolder
   )
   const destinationFilename =
@@ -1076,6 +1354,12 @@ async function planOrganizeAction({
     return action
   }
   if (getExtension(path.basename(sourcePath)) !== getExtension(destinationFilename)) {
+    const transformEntry = findPdfCbzEntryByCbzPath(cache, sourcePath)
+    if (transformEntry && getExtension(candidate.filename) === 'pdf') {
+      action.status = 'already-correct'
+      action.reason = 'Generated CBZ transform already satisfies the selected PDF.'
+      return action
+    }
     action.status = 'conflict'
     action.reason =
       'Matched local file uses a different extension; organize will not rename formats.'
@@ -1486,10 +1770,12 @@ function buildCanonicalDuplicateDecisions({
   orders,
   config,
   publisherMediaScores,
+  publisherFolderCandidates,
 }: {
   orders: MetadataOrder[]
   config: AppConfig
   publisherMediaScores: Map<string, MediaScore>
+  publisherFolderCandidates: string[]
 }): Map<string, CanonicalDuplicateDecision> {
   const groups = new Map<
     string,
@@ -1531,6 +1817,7 @@ function buildCanonicalDuplicateDecisions({
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
           publisherMediaScores,
+          publisherFolderCandidates,
         }
       )
       if (!routedCandidate) {
@@ -1699,15 +1986,21 @@ function shouldScanSingleLevelFlatLeftoverFolder({
   folderName,
   directFileCount,
   childDirectoryCount,
+  publisherFolderCandidates,
 }: {
   folderName: string
   directFileCount: number
   childDirectoryCount: number
+  publisherFolderCandidates: string[]
 }): boolean {
   if (/bundle/i.test(folderName)) {
     return true
   }
-  if (inferPublisherFolder(folderName) !== 'humble') {
+  const folderFamilyKey = normalizePublisherFamilyKey(folderName)
+  const nonSelfPublisherCandidates = publisherFolderCandidates.filter(
+    (candidate) => normalizePublisherFamilyKey(candidate) !== folderFamilyKey
+  )
+  if (inferPublisherFolder(folderName, nonSelfPublisherCandidates) !== 'humble') {
     return true
   }
   if (!suspiciousAllCapsFolderPattern.test(folderName)) {
@@ -1789,8 +2082,15 @@ function selectMetadataDownloadMatch(
   }
 }
 
-function inferUntrackedFlatLeftoverPublisher(folderName: string, order?: MetadataOrder): string {
-  const inferredPublisher = inferPublisherFolder(order?.bundleTitle ?? folderName)
+function inferUntrackedFlatLeftoverPublisher(
+  folderName: string,
+  order: MetadataOrder | undefined,
+  publisherFolderCandidates: string[]
+): string {
+  const inferredPublisher = inferPublisherFolder(
+    order?.bundleTitle ?? folderName,
+    publisherFolderCandidates
+  )
   return inferredPublisher === 'humble' ? cleanName(folderName) || 'humble' : inferredPublisher
 }
 
@@ -2017,12 +2317,14 @@ function firstRoutedLibraryForProduct({
   product,
   fallbackLibrary,
   publisherMediaScores,
+  publisherFolderCandidates,
 }: {
   config: AppConfig
   order: MetadataOrder
   product: MetadataProduct
   fallbackLibrary: ScanLibraryConfig
   publisherMediaScores?: Map<string, MediaScore>
+  publisherFolderCandidates: string[]
 }): ScanLibraryConfig {
   const selected = selectRoutedDownloadCandidates(
     product.downloads.map((download) => metadataCandidate(download)),
@@ -2031,6 +2333,7 @@ function firstRoutedLibraryForProduct({
       bundleTitle: order.bundleTitle,
       productTitle: product.productTitle,
       publisherMediaScores,
+      publisherFolderCandidates,
     }
   )
   return selected[0]?.library ?? fallbackLibrary
@@ -2049,11 +2352,12 @@ async function planSingleLevelFlatLeftovers({
   conflictDir,
   publisherMediaScores,
   canonicalDuplicateDecisions,
+  publisherFolderCandidates,
 }: {
   orders: MetadataOrder[]
   config: AppConfig
   actions: OrganizeAction[]
-  flatPublisherFoldersByProduct: Map<string, string>
+  flatPublisherFoldersByProduct: Map<string, FlatPublisherSelection>
   plannedSources: Set<string>
   plannedMovesBySource: Map<string, string>
   plannedDestinations: Set<string>
@@ -2062,6 +2366,7 @@ async function planSingleLevelFlatLeftovers({
   conflictDir?: string
   publisherMediaScores?: Map<string, MediaScore>
   canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
+  publisherFolderCandidates: string[]
 }): Promise<void> {
   for (const library of config.scanLibraries) {
     let topLevelEntries
@@ -2110,6 +2415,7 @@ async function planSingleLevelFlatLeftovers({
           folderName: topLevelEntry.name,
           directFileCount: childEntries.filter((entry) => entry.isFile()).length,
           childDirectoryCount: childEntries.filter((entry) => entry.isDirectory()).length,
+          publisherFolderCandidates,
         })
       ) {
         continue
@@ -2129,7 +2435,10 @@ async function planSingleLevelFlatLeftovers({
         const matchResult = findMetadataDownloadForFlatLeftover(filename, orders)
         if (matchResult.type !== 'matched') {
           if (matchResult.type === 'untracked') {
-            const inferredPublisher = inferPublisherFolder(topLevelEntry.name)
+            const inferredPublisher = inferPublisherFolder(
+              topLevelEntry.name,
+              publisherFolderCandidates
+            )
             if (!topLevelOrder && inferredPublisher === 'humble') {
               actions.push({
                 cacheKey: `flat-leftover:${normalizedSource}`,
@@ -2149,7 +2458,8 @@ async function planSingleLevelFlatLeftovers({
             }
             const publisherFolder = inferUntrackedFlatLeftoverPublisher(
               topLevelEntry.name,
-              topLevelOrder
+              topLevelOrder,
+              publisherFolderCandidates
             )
             const destinationPath = path.join(
               buildLibraryProductFolder(
@@ -2253,6 +2563,7 @@ async function planSingleLevelFlatLeftovers({
             bundleTitle: order.bundleTitle,
             productTitle: product.productTitle,
             publisherMediaScores,
+            publisherFolderCandidates,
           })[0]?.library ??
           firstRoutedLibraryForProduct({
             config,
@@ -2260,13 +2571,27 @@ async function planSingleLevelFlatLeftovers({
             product,
             fallbackLibrary: library,
             publisherMediaScores,
+            publisherFolderCandidates,
           })
         const productKey = normalizeFlatProductKey(product.productTitle)
-        const publisherFolder =
-          flatPublisherFoldersByProduct.get(productKey) ?? inferPublisherFolder(order.bundleTitle)
+        const publisherSelection =
+          flatPublisherFoldersByProduct.get(productKey) ??
+          ({
+            folder: inferPublisherFolder(order.bundleTitle, publisherFolderCandidates),
+            source: 'inferred',
+            dominantEnriched: false,
+          } satisfies FlatPublisherSelection)
+        const resolvedPublisherFolder = await resolveFlatPublisherFolder({
+          libraryPath: routedLibrary.path,
+          selection: publisherSelection,
+          bundleTitle: order.bundleTitle,
+          productTitle: product.productTitle,
+          sourcePath,
+          publisherFolderCandidates,
+        })
         const stableSeriesFolder = await findExistingFlatSeriesFolder(
           routedLibrary.path,
-          publisherFolder,
+          resolvedPublisherFolder,
           product.productTitle
         )
         const destinationPath = path.join(
@@ -2274,7 +2599,7 @@ async function planSingleLevelFlatLeftovers({
             { ...routedLibrary, layout: 'flat' as const },
             order.bundleTitle,
             product.productTitle,
-            publisherFolder,
+            resolvedPublisherFolder,
             stableSeriesFolder
           ),
           filename
@@ -2366,11 +2691,12 @@ async function planManagedHumbleFlatLeftovers({
   conflictDir,
   publisherMediaScores,
   canonicalDuplicateDecisions,
+  publisherFolderCandidates,
 }: {
   orders: MetadataOrder[]
   config: AppConfig
   actions: OrganizeAction[]
-  flatPublisherFoldersByProduct: Map<string, string>
+  flatPublisherFoldersByProduct: Map<string, FlatPublisherSelection>
   plannedSources: Set<string>
   plannedMovesBySource: Map<string, string>
   plannedDestinations: Set<string>
@@ -2379,6 +2705,7 @@ async function planManagedHumbleFlatLeftovers({
   conflictDir?: string
   publisherMediaScores?: Map<string, MediaScore>
   canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
+  publisherFolderCandidates: string[]
 }): Promise<void> {
   for (const library of config.scanLibraries) {
     const humbleFolder = path.join(library.path, 'humble')
@@ -2429,6 +2756,7 @@ async function planManagedHumbleFlatLeftovers({
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
           publisherMediaScores,
+          publisherFolderCandidates,
         })[0]?.library ??
         firstRoutedLibraryForProduct({
           config,
@@ -2436,17 +2764,31 @@ async function planManagedHumbleFlatLeftovers({
           product,
           fallbackLibrary: library,
           publisherMediaScores,
+          publisherFolderCandidates,
         })
       if (!shouldDownloadExtension(filename, routedLibrary)) {
         continue
       }
 
       const productKey = normalizeFlatProductKey(product.productTitle)
-      const publisherFolder =
-        flatPublisherFoldersByProduct.get(productKey) ?? inferPublisherFolder(order.bundleTitle)
+      const publisherSelection =
+        flatPublisherFoldersByProduct.get(productKey) ??
+        ({
+          folder: inferPublisherFolder(order.bundleTitle, publisherFolderCandidates),
+          source: 'inferred',
+          dominantEnriched: false,
+        } satisfies FlatPublisherSelection)
+      const resolvedPublisherFolder = await resolveFlatPublisherFolder({
+        libraryPath: routedLibrary.path,
+        selection: publisherSelection,
+        bundleTitle: order.bundleTitle,
+        productTitle: product.productTitle,
+        sourcePath,
+        publisherFolderCandidates,
+      })
       const stableSeriesFolder = await findExistingFlatSeriesFolder(
         routedLibrary.path,
-        publisherFolder,
+        resolvedPublisherFolder,
         product.productTitle
       )
       const destinationPath = path.join(
@@ -2454,7 +2796,7 @@ async function planManagedHumbleFlatLeftovers({
           { ...routedLibrary, layout: 'flat' as const },
           order.bundleTitle,
           product.productTitle,
-          publisherFolder,
+          resolvedPublisherFolder,
           stableSeriesFolder
         ),
         filename
@@ -2536,12 +2878,13 @@ async function planFlatLeftovers({
   publisherMediaScores,
   canonicalDuplicateDecisions,
   planEmptyFoldersFromActions,
+  publisherFolderCandidates,
 }: {
   orders: MetadataOrder[]
   config: AppConfig
   actions: OrganizeAction[]
   allBundleTitles: string[]
-  flatPublisherFoldersByProduct: Map<string, string>
+  flatPublisherFoldersByProduct: Map<string, FlatPublisherSelection>
   plannedMovesBySource: Map<string, string>
   plannedDestinations: Set<string>
   resolveConflicts: ConflictResolutionMode
@@ -2549,6 +2892,7 @@ async function planFlatLeftovers({
   publisherMediaScores?: Map<string, MediaScore>
   canonicalDuplicateDecisions?: Map<string, CanonicalDuplicateDecision>
   planEmptyFoldersFromActions?: boolean
+  publisherFolderCandidates: string[]
 }): Promise<void> {
   const plannedSources = new Set(
     actions
@@ -2613,6 +2957,7 @@ async function planFlatLeftovers({
                 product: effectiveProduct,
                 fallbackLibrary: library,
                 publisherMediaScores,
+                publisherFolderCandidates,
               })
             : library
           if (
@@ -2622,14 +2967,26 @@ async function planFlatLeftovers({
           ) {
             continue
           }
-          const publisherFolder =
+          const publisherSelection =
             flatPublisherFoldersByProduct.get(normalizeFlatProductKey(productTitle)) ??
-            inferPublisherFolder(effectiveOrder.bundleTitle)
+            ({
+              folder: inferPublisherFolder(effectiveOrder.bundleTitle, publisherFolderCandidates),
+              source: 'inferred',
+              dominantEnriched: false,
+            } satisfies FlatPublisherSelection)
+          const resolvedPublisherFolder = await resolveFlatPublisherFolder({
+            libraryPath: routedLibrary.path,
+            selection: publisherSelection,
+            bundleTitle: effectiveOrder.bundleTitle,
+            productTitle,
+            sourcePath,
+            publisherFolderCandidates,
+          })
           const productDestinationFolder = buildLibraryProductFolder(
             { ...routedLibrary, layout: 'flat' as const },
             effectiveOrder.bundleTitle,
             productTitle,
-            publisherFolder,
+            resolvedPublisherFolder,
             effectiveProduct ? undefined : 'Extras'
           )
           const destinationPath = path.join(productDestinationFolder, relativeSource)
@@ -2721,6 +3078,7 @@ async function planFlatLeftovers({
     conflictDir,
     publisherMediaScores,
     canonicalDuplicateDecisions,
+    publisherFolderCandidates,
   })
 
   await planSingleLevelFlatLeftovers({
@@ -2736,6 +3094,7 @@ async function planFlatLeftovers({
     conflictDir,
     publisherMediaScores,
     canonicalDuplicateDecisions,
+    publisherFolderCandidates,
   })
 
   await planFlatPublisherAliasFolders({
@@ -3025,12 +3384,14 @@ async function planFlatEmptySeriesFolders({
 }: {
   config: AppConfig
   actions: OrganizeAction[]
-  flatPublisherFoldersByProduct: Map<string, string>
+  flatPublisherFoldersByProduct: Map<string, FlatPublisherSelection>
 }): Promise<void> {
   const plannedEmptyFolders = plannedEmptyFolderSet(actions)
   const managedPublisherFamilies = new Set(
     [...flatPublisherFoldersByProduct.values(), 'humble']
-      .map((folder) => normalizePublisherFamilyKey(folder))
+      .map((selection) =>
+        normalizePublisherFamilyKey(typeof selection === 'string' ? selection : selection.folder)
+      )
       .filter(Boolean)
   )
 
@@ -3230,9 +3591,22 @@ export async function organizeLibrary({
   resolveConflicts,
   conflictDir,
   reportPath,
+  useEnrichedMetadata = true,
+  enrichedMetadataPath,
   onProgress,
 }: OrganizeOptions): Promise<OrganizeReport> {
-  if (flat && apply && !config.configPath) {
+  const forceFlat = flat === true
+  const planningConfig = configWithFlatOverride(config, forceFlat)
+  const hasConfiguredFlatLayout = hasFlatLibraries(config)
+  const hasFlatLayout = hasFlatLibraries(planningConfig)
+  const flatPlanningConfig = hasFlatLayout
+    ? {
+        ...planningConfig,
+        scanLibraries: planningConfig.scanLibraries.filter((library) => isLibraryFlat(library)),
+      }
+    : planningConfig
+
+  if (hasFlatLayout && apply && !config.configPath) {
     throw new Error(
       'organize --flat --apply requires a loaded config file so libraries can be marked as flat.'
     )
@@ -3255,26 +3629,42 @@ export async function organizeLibrary({
   if (resolveConflicts && !conflictModes.includes(resolveConflicts)) {
     throw new Error(`--resolve-conflicts must be one of: ${conflictModes.join(', ')}.`)
   }
-  const effectiveResolveConflicts: ConflictResolutionMode = flat
+  const effectiveResolveConflicts: ConflictResolutionMode = hasFlatLayout
     ? (resolveConflicts ??
       config.flatConflictResolution ??
-      (config.scanLibraries.some((library) => library.layout === 'flat')
-        ? FLAT_CONFLICT_RESOLUTION_DEFAULT
-        : 'report'))
+      (hasConfiguredFlatLayout ? FLAT_CONFLICT_RESOLUTION_DEFAULT : 'report'))
     : (resolveConflicts ?? 'report')
-  if (!flat && effectiveResolveConflicts !== 'report') {
+  if (!hasFlatLayout && effectiveResolveConflicts !== 'report') {
     throw new Error('--resolve-conflicts is only supported with organize --flat.')
   }
-  const flatPublisherFoldersByProduct = flat ? buildPublisherFoldersByProduct(orders) : new Map()
-  const publisherMediaScores = buildPublisherMediaScores(orders)
-  const canonicalDuplicateDecisions = flat
-    ? buildCanonicalDuplicateDecisions({ orders, config, publisherMediaScores })
+  const enrichedMetadata =
+    hasFlatLayout && useEnrichedMetadata
+      ? await loadEnrichedMetadata(
+          config.libraryPath,
+          enrichedMetadataPath ?? config.enrichedMetadataPath
+        )
+      : undefined
+  const publisherFolderCandidates = hasFlatLayout
+    ? await collectPublisherFolderCandidates(flatPlanningConfig.scanLibraries)
+    : []
+  const flatPublisherFoldersByProduct = hasFlatLayout
+    ? buildPublisherFoldersByProduct(orders, enrichedMetadata, publisherFolderCandidates)
+    : new Map()
+  const publisherMediaScores = buildPublisherMediaScores(orders, publisherFolderCandidates)
+  const canonicalDuplicateDecisions = hasFlatLayout
+    ? buildCanonicalDuplicateDecisions({
+        orders,
+        config: flatPlanningConfig,
+        publisherMediaScores,
+        publisherFolderCandidates,
+      })
     : undefined
   const allBundleTitles = orders.map((order) => order.bundleTitle)
 
-  const scanPaths = getScanPaths(config)
+  const scanPaths = getScanPaths(planningConfig)
   onProgress?.('Indexing local files...')
   const localDirectoryIndex = await buildLocalDirectoryIndex(scanPaths)
+  const cache = await loadCache(planningConfig.libraryPath, planningConfig.cachePath)
   const actions: OrganizeAction[] = []
   const plannedMovesBySource = new Map<string, string>()
   const plannedDestinations = new Set<string>()
@@ -3297,23 +3687,25 @@ export async function organizeLibrary({
       productsProcessed += 1
       const selected = selectRoutedDownloadCandidates(
         product.downloads.map((download) => metadataCandidate(download)),
-        config,
+        planningConfig,
         {
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
           publisherMediaScores,
+          publisherFolderCandidates,
         }
       )
       selectedCandidates += selected.length
 
       for (const routedCandidate of selected) {
         const { candidate } = routedCandidate
+        const actionFlat = isLibraryFlat(routedCandidate.library)
         const flatKey = flatPlannedFileKey(
           routedCandidate,
           product.productTitle,
           candidate.filename
         )
-        if (flat && plannedFlatFiles.has(flatKey)) {
+        if (actionFlat && plannedFlatFiles.has(flatKey)) {
           continue
         }
         const action = await planOrganizeAction({
@@ -3326,11 +3718,12 @@ export async function organizeLibrary({
           requireSameExtension: false,
           scanPaths,
           inferredBundleFolder,
-          config,
+          config: planningConfig,
+          cache,
           localDirectoryIndex,
           canonical,
-          flat,
-          publisherFolder: flatPublisherFoldersByProduct.get(
+          flat: actionFlat,
+          publisherSelection: flatPublisherFoldersByProduct.get(
             normalizeFlatProductKey(product.productTitle)
           ),
           orders,
@@ -3341,10 +3734,11 @@ export async function organizeLibrary({
           plannedDestinations,
           canonicalDuplicateDecisions,
           moveReason: mediaClassificationMoveReason(routedCandidate),
+          publisherFolderCandidates,
         })
         if (action) {
           actions.push(action)
-          if (flat && shouldReserveFlatPlannedFile(action)) {
+          if (actionFlat && shouldReserveFlatPlannedFile(action)) {
             plannedFlatFiles.add(flatKey)
           }
         }
@@ -3359,10 +3753,11 @@ export async function organizeLibrary({
         if (selectedCacheKeys.has(cacheKey)) {
           continue
         }
-        const [routedCandidate] = selectRoutedDownloadCandidates([candidate], config, {
+        const [routedCandidate] = selectRoutedDownloadCandidates([candidate], planningConfig, {
           bundleTitle: order.bundleTitle,
           productTitle: product.productTitle,
           publisherMediaScores,
+          publisherFolderCandidates,
         })
         if (!routedCandidate) {
           continue
@@ -3371,12 +3766,13 @@ export async function organizeLibrary({
         const effectiveRoutedCandidate = inheritedLibrary
           ? inheritSelectedProductLibrary(routedCandidate, inheritedLibrary)
           : routedCandidate
+        const actionFlat = isLibraryFlat(effectiveRoutedCandidate.library)
         const flatKey = flatPlannedFileKey(
           effectiveRoutedCandidate,
           product.productTitle,
           candidate.filename
         )
-        if (flat && plannedFlatFiles.has(flatKey)) {
+        if (actionFlat && plannedFlatFiles.has(flatKey)) {
           continue
         }
         const action = await planOrganizeAction({
@@ -3389,11 +3785,12 @@ export async function organizeLibrary({
           requireSameExtension: true,
           scanPaths,
           inferredBundleFolder,
-          config,
+          config: planningConfig,
+          cache,
           localDirectoryIndex,
           canonical,
-          flat,
-          publisherFolder: flatPublisherFoldersByProduct.get(
+          flat: actionFlat,
+          publisherSelection: flatPublisherFoldersByProduct.get(
             normalizeFlatProductKey(product.productTitle)
           ),
           orders,
@@ -3406,10 +3803,11 @@ export async function organizeLibrary({
           moveReason: inheritedLibrary
             ? 'Alternate format follows the selected product library.'
             : mediaClassificationMoveReason(effectiveRoutedCandidate),
+          publisherFolderCandidates,
         })
         if (action) {
           actions.push(action)
-          if (flat && shouldReserveFlatPlannedFile(action)) {
+          if (actionFlat && shouldReserveFlatPlannedFile(action)) {
             plannedFlatFiles.add(flatKey)
           }
         }
@@ -3417,11 +3815,11 @@ export async function organizeLibrary({
     }
   }
 
-  if (flat) {
+  if (hasFlatLayout) {
     onProgress?.('Planning flat leftovers...')
     await planFlatLeftovers({
       orders,
-      config,
+      config: flatPlanningConfig,
       actions,
       allBundleTitles,
       flatPublisherFoldersByProduct,
@@ -3432,33 +3830,34 @@ export async function organizeLibrary({
       publisherMediaScores,
       canonicalDuplicateDecisions,
       planEmptyFoldersFromActions: !apply,
+      publisherFolderCandidates,
     })
   }
 
   if (apply) {
     await applyOrganizeActions(actions, onProgress)
-    if (flat) {
+    if (hasFlatLayout) {
       onProgress?.('Cleaning empty flat folders...')
       const postApplyEmptyStart = actions.length
       await planFlatEmptyPublisherFamilyFolders({
-        config,
+        config: flatPlanningConfig,
         actions,
       })
       await planFlatEmptySeriesFolders({
-        config,
+        config: flatPlanningConfig,
         actions,
         flatPublisherFoldersByProduct,
       })
       await planFlatEmptyLegacyFolders({
         orders,
-        config,
+        config: flatPlanningConfig,
         actions,
         allBundleTitles,
       })
       await applyOrganizeActions(actions.slice(postApplyEmptyStart), onProgress)
     }
-    if (flat && config.configPath) {
-      await recordFlatOrganizeCache({ config, actions })
+    if (hasFlatLayout && config.configPath) {
+      await recordFlatOrganizeCache({ config: flatPlanningConfig, actions })
       await markConfigLibrariesFlat(config.configPath)
     }
   }
