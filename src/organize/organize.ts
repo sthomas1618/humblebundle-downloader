@@ -33,6 +33,7 @@ import {
 } from '../download/downloader'
 import {
   findPdfCbzEntryByCbzPath,
+  isPdfCbzTransformForSource,
   loadCache,
   saveCache,
   upsertFlatIndexEntry,
@@ -1355,7 +1356,11 @@ async function planOrganizeAction({
   }
   if (getExtension(path.basename(sourcePath)) !== getExtension(destinationFilename)) {
     const transformEntry = findPdfCbzEntryByCbzPath(cache, sourcePath)
-    if (transformEntry && getExtension(candidate.filename) === 'pdf') {
+    if (
+      transformEntry &&
+      getExtension(candidate.filename) === 'pdf' &&
+      isPdfCbzTransformForSource(transformEntry, cacheKey)
+    ) {
       action.status = 'already-correct'
       action.reason = 'Generated CBZ transform already satisfies the selected PDF.'
       return action

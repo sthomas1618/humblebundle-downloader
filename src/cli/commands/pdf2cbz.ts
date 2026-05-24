@@ -1,4 +1,6 @@
 import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { mkdir, rename, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -68,6 +70,28 @@ async function fileStats(filePath: string): Promise<PdfFileStats | undefined> {
   }
 }
 
+async function fileSha256(filePath: string): Promise<string | undefined> {
+  try {
+    return await new Promise((resolve, reject) => {
+      const hash = createHash('sha256')
+      const stream = createReadStream(filePath)
+      stream.on('error', reject)
+      stream.on('data', (chunk) => hash.update(chunk))
+      stream.on('end', () => resolve(hash.digest('hex')))
+    })
+  } catch {
+    return undefined
+  }
+}
+
+async function sameFileContent(left: string, right: string): Promise<boolean | undefined> {
+  const [leftHash, rightHash] = await Promise.all([fileSha256(left), fileSha256(right)])
+  if (!leftHash || !rightHash) {
+    return undefined
+  }
+  return leftHash === rightHash
+}
+
 function selectedLibrary(config: AppConfig): ScanLibraryConfig {
   return (
     config.scanLibraries.find((library) => library.name && library.name === config.libraryName) ??
@@ -120,8 +144,19 @@ async function archivePdf(
   const existingStats = await fileStats(targetPath)
   if (existingStats) {
     if (existingStats.size === pdfStats.size) {
-      await rm(pdfPath, { force: false })
-      return { archivePdfPath: targetPath, archiveStatus: 'duplicate-removed' }
+      const duplicate = await sameFileContent(pdfPath, targetPath)
+      if (duplicate) {
+        await rm(pdfPath, { force: false })
+        return { archivePdfPath: targetPath, archiveStatus: 'duplicate-removed' }
+      }
+      return {
+        archivePdfPath: targetPath,
+        archiveStatus: 'conflict',
+        archiveConflictReason:
+          duplicate === false
+            ? 'Archive target already exists with the same file size but different content.'
+            : 'Archive target already exists and content identity could not be verified.',
+      }
     }
     return {
       archivePdfPath: targetPath,
@@ -217,6 +252,10 @@ export function buildComicInfoFields(
     Publisher: publisher,
     Notes: notes,
   }
+}
+
+export const pdf2cbzCommandTestUtils = {
+  archivePdf,
 }
 
 export function registerPdf2CbzCommand(program: Command): void {

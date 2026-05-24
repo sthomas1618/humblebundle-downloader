@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -7,8 +7,17 @@ import { describe, expect, it } from 'bun:test'
 import { ZipFile } from 'yazl'
 import yauzl from 'yauzl'
 
-import { buildComicInfoFields } from '../src/cli/commands/pdf2cbz'
+import { buildComicInfoFields, pdf2cbzCommandTestUtils } from '../src/cli/commands/pdf2cbz'
 import { pdf2cbzTestUtils } from '../src/tools/pdf2cbz'
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
 
 async function readZipEntry(zipPath: string, entryName: string): Promise<Buffer | undefined> {
   return await new Promise((resolve, reject) => {
@@ -230,5 +239,61 @@ describe('pdf2cbz naming and preservation helpers', () => {
 
   it('does not build ComicInfo fields for unmatched PDFs', () => {
     expect(buildComicInfoFields('/library/unmatched.pdf', {})).toBeUndefined()
+  })
+
+  it('does not remove source PDFs when an archive target has only the same size', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-pdf2cbz-test-'))
+    const sourcePath = path.join(temporaryDirectory, 'source.pdf')
+    const archivePath = path.join(temporaryDirectory, 'Archive', 'source.pdf')
+
+    try {
+      await writeFile(sourcePath, 'abc')
+      await mkdir(path.dirname(archivePath), { recursive: true })
+      await writeFile(archivePath, 'xyz')
+
+      const result = await pdf2cbzCommandTestUtils.archivePdf(
+        sourcePath,
+        { mtimeMs: Date.now(), size: 3 },
+        archivePath
+      )
+
+      expect(result).toMatchObject({
+        archivePdfPath: archivePath,
+        archiveStatus: 'conflict',
+        archiveConflictReason:
+          'Archive target already exists with the same file size but different content.',
+      })
+      expect(await readFile(sourcePath, 'utf8')).toBe('abc')
+      expect(await readFile(archivePath, 'utf8')).toBe('xyz')
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('removes source PDFs only when an archive target has identical content', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-pdf2cbz-test-'))
+    const sourcePath = path.join(temporaryDirectory, 'source.pdf')
+    const archivePath = path.join(temporaryDirectory, 'Archive', 'source.pdf')
+
+    try {
+      await writeFile(sourcePath, 'abc')
+      await mkdir(path.dirname(archivePath), { recursive: true })
+      await writeFile(archivePath, 'abc')
+
+      const result = await pdf2cbzCommandTestUtils.archivePdf(
+        sourcePath,
+        { mtimeMs: Date.now(), size: 3 },
+        archivePath
+      )
+
+      expect(result).toEqual({
+        archivePdfPath: archivePath,
+        archiveStatus: 'duplicate-removed',
+      })
+      expect(await pathExists(sourcePath)).toBe(false)
+      expect(await readFile(archivePath, 'utf8')).toBe('abc')
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
   })
 })

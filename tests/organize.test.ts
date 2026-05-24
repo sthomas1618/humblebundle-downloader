@@ -1815,6 +1815,138 @@ describe('organizeLibrary', () => {
     }
   })
 
+  it('only treats generated CBZ transforms as satisfying their own source PDF', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
+
+    try {
+      const booksPath = path.join(temporaryDirectory, 'Books')
+      const scanPath = path.join(temporaryDirectory, 'Scan')
+      const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
+      const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+      const bundleTitle = 'Humble Book Bundle: PDFs'
+      const wrongProductTitle = 'Wrong Transform'
+      const matchedProductTitle = 'Matched Transform'
+      const wrongCbzPath = path.join(
+        buildProductFolder(scanPath, bundleTitle, wrongProductTitle),
+        'wrong.cbz'
+      )
+      const matchedCbzPath = path.join(
+        buildProductFolder(scanPath, bundleTitle, matchedProductTitle),
+        'matched.cbz'
+      )
+
+      await mkdir(path.dirname(wrongCbzPath), { recursive: true })
+      await mkdir(path.dirname(matchedCbzPath), { recursive: true })
+      await writeFile(wrongCbzPath, 'wrong cbz')
+      await writeFile(matchedCbzPath, 'matched cbz')
+      await writeMetadata(metadataPath, {
+        'order-1': {
+          orderId: 'order-1',
+          bundleTitle,
+          updatedAt: new Date().toISOString(),
+          products: [
+            {
+              productTitle: wrongProductTitle,
+              downloads: [
+                {
+                  cacheKey: 'order-1:wrong.pdf',
+                  filename: 'wrong.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+            {
+              productTitle: matchedProductTitle,
+              downloads: [
+                {
+                  cacheKey: 'order-1:matched.pdf',
+                  filename: 'matched.pdf',
+                  extension: 'pdf',
+                  platform: 'ebook',
+                },
+              ],
+            },
+          ],
+        },
+      })
+      await writeFile(
+        cachePath,
+        JSON.stringify(
+          {
+            transforms: {
+              pdf: {
+                cbz: {
+                  version: 1,
+                  entries: {
+                    'other-source.pdf': {
+                      version: 1,
+                      pdfKey: 'order-1:other.pdf',
+                      pdfOriginalPath: path.join(booksPath, bundleTitle, 'Other', 'other.pdf'),
+                      pdfMtimeMs: 1,
+                      pdfSize: 1,
+                      cbzPath: wrongCbzPath,
+                      lastGeneratedMs: 1,
+                    },
+                    'order-1:matched.pdf': {
+                      version: 1,
+                      pdfKey: 'order-1:matched.pdf',
+                      pdfOriginalPath: path.join(
+                        booksPath,
+                        bundleTitle,
+                        matchedProductTitle,
+                        'matched.pdf'
+                      ),
+                      pdfMtimeMs: 1,
+                      pdfSize: 1,
+                      cbzPath: matchedCbzPath,
+                      lastGeneratedMs: 1,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          undefined,
+          2
+        )
+      )
+
+      const report = await organizeLibrary({
+        flat: false,
+        config: resolveConfig({
+          mediaRoot: temporaryDirectory,
+          defaultLibrary: 'books',
+          metadataPath,
+          cachePath,
+          scanPaths: [scanPath],
+          libraries: {
+            books: {
+              path: booksPath,
+              extInclude: ['pdf', 'cbz'],
+              formatPriority: ['cbz', 'pdf'],
+            },
+          },
+        }),
+      })
+
+      const wrongAction = report.actions.find((action) => action.cacheKey === 'order-1:wrong.pdf')
+      const matchedAction = report.actions.find(
+        (action) => action.cacheKey === 'order-1:matched.pdf'
+      )
+      expect(wrongAction).toMatchObject({
+        status: 'conflict',
+        reason: 'Matched local file uses a different extension; organize will not rename formats.',
+      })
+      expect(matchedAction).toMatchObject({
+        status: 'already-correct',
+        reason: 'Generated CBZ transform already satisfies the selected PDF.',
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('moves single-level alternate formats by unique metadata stem without renaming', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-organize-'))
 
