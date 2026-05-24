@@ -88,6 +88,8 @@ describe('runDoctor', () => {
         cacheExists: true,
         cacheEntries: 2,
         transformEntries: 1,
+        transformArchiveConflicts: 0,
+        invalidTransformEntries: [],
         invalidEntries: ['order-1:bad.cbz'],
         legacyCachePaths: [path.join(comicsPath, '.cache.json')],
         failureReportExists: true,
@@ -310,6 +312,185 @@ describe('runDoctor', () => {
       expect(
         report.checks.some((check) => check.message.includes('Ambiguous routing decisions: 1'))
       ).toBe(false)
+    })
+  })
+
+  it('treats expected archive alternates as in-place during deep validation', async () => {
+    await withTemporaryDirectory(async (temporaryDirectory) => {
+      const mediaRoot = path.join(temporaryDirectory, 'Media')
+      const comicsPath = path.join(mediaRoot, 'Comics')
+      const archiveRoot = path.join(temporaryDirectory, 'Archive')
+      const archiveFolder = path.join(
+        archiveRoot,
+        'Comics',
+        'Humble Comics Bundle - Example',
+        'Issue 1'
+      )
+      const cachePath = path.join(mediaRoot, '.hbd', 'cache.json')
+      await mkdir(archiveFolder, { recursive: true })
+      await writeFile(path.join(archiveFolder, 'issue.pdf'), 'pdf')
+      await mkdir(path.dirname(cachePath), { recursive: true })
+      await writeFile(
+        cachePath,
+        `${JSON.stringify({
+          'archive:order-1:issue.pdf': { urlLastModified: 'Mon, 01 Jan 2024 00:00:00 GMT' },
+        })}\n`
+      )
+
+      const client: ApiClient = {
+        session: {},
+        fetchJson: async () => {
+          throw new Error('Unexpected fetchJson call')
+        },
+        fetchText: async () => {
+          throw new Error('Unexpected fetchText call')
+        },
+        getLibraryPage: async () => createLibraryPage('order-1'),
+        getOrderDetails: async () => ({
+          product: { human_name: 'Humble Comics Bundle: Example' },
+          subproducts: [
+            {
+              human_name: 'Issue 1',
+              downloads: [
+                {
+                  platform: 'ebook',
+                  download_struct: [
+                    { url: { web: 'https://example.com/issue.cbz' } },
+                    { url: { web: 'https://example.com/issue.pdf' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+        getTroveProducts: async () => [],
+        signTroveDownload: async () => ({}),
+      }
+
+      const report = await runDoctor({
+        config: resolveConfig({
+          mediaRoot,
+          archiveRoot,
+          defaultLibrary: 'comics',
+          cachePath,
+          purchaseKeys: ['order-1'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz'],
+              archiveFormats: ['pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+          },
+        }),
+        client,
+        deep: true,
+      })
+
+      expect(report.deepCache?.wrongLibrary).toEqual([])
+      expect(report.deepCache?.cachedButMissing).toEqual([])
+      expect(report.deepCache?.localButUncached).toEqual([])
+      expect(report.deepCache?.orphanCacheEntries).toEqual([])
+    })
+  })
+
+  it('treats generated CBZ transforms as satisfying source PDF candidates', async () => {
+    await withTemporaryDirectory(async (temporaryDirectory) => {
+      const comicsPath = path.join(temporaryDirectory, 'Comics')
+      const cachePath = path.join(temporaryDirectory, '.hbd', 'cache.json')
+      const cbzPath = path.join(comicsPath, 'Bundle', 'Issue', 'issue.cbz')
+      await mkdir(path.dirname(cbzPath), { recursive: true })
+      await mkdir(path.dirname(cachePath), { recursive: true })
+      await writeFile(cbzPath, 'generated cbz')
+      await writeFile(
+        cachePath,
+        JSON.stringify({
+          transforms: {
+            pdf: {
+              cbz: {
+                version: 1,
+                entries: {
+                  [path.join('Bundle', 'Issue', 'issue.pdf')]: {
+                    version: 1,
+                    libraryName: 'comics',
+                    libraryPath: comicsPath,
+                    pdfKey: path.join('Bundle', 'Issue', 'issue.pdf'),
+                    pdfOriginalPath: path.join(comicsPath, 'Bundle', 'Issue', 'issue.pdf'),
+                    pdfMtimeMs: 1,
+                    pdfSize: 100,
+                    cbzPath,
+                    cbzMtimeMs: 2,
+                    cbzSize: 13,
+                    archiveStatus: 'moved',
+                    archivePdfPath: path.join(
+                      temporaryDirectory,
+                      'Archive',
+                      'Comics',
+                      'Bundle',
+                      'Issue',
+                      'issue.pdf'
+                    ),
+                    lastGeneratedMs: 3,
+                  },
+                },
+              },
+            },
+          },
+        })
+      )
+
+      const client: ApiClient = {
+        session: {},
+        fetchJson: async () => {
+          throw new Error('Unexpected fetchJson call')
+        },
+        fetchText: async () => {
+          throw new Error('Unexpected fetchText call')
+        },
+        getLibraryPage: async () => createLibraryPage('order-1'),
+        getOrderDetails: async () => ({
+          product: { human_name: 'Bundle' },
+          subproducts: [
+            {
+              human_name: 'Issue',
+              downloads: [
+                {
+                  platform: 'ebook',
+                  download_struct: [
+                    {
+                      url: { web: 'https://example.com/issue.pdf' },
+                      file_size: 100,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+        getTroveProducts: async () => [],
+        signTroveDownload: async () => ({}),
+      }
+
+      const report = await runDoctor({
+        config: resolveConfig({
+          defaultLibrary: 'comics',
+          cachePath,
+          purchaseKeys: ['order-1'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              extInclude: ['cbz', 'pdf'],
+            },
+          },
+        }),
+        client,
+        deep: true,
+      })
+
+      expect(report.deepCache?.localButUncached).toEqual([])
+      expect(report.deepCache?.sizeMismatches).toEqual([])
+      expect(report.deepCache?.notDownloadedYet).toEqual([])
     })
   })
 })

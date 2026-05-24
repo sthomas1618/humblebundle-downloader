@@ -4,6 +4,7 @@ import { resolveConfig } from '../src/config'
 import {
   buildPublisherMediaScores,
   publisherMediaScoreKey,
+  selectArchiveDownloadCandidates,
   selectPreferredDownloadCandidates,
   selectRoutedDownloadCandidates,
   shouldDownloadExtension,
@@ -152,6 +153,150 @@ describe('format priority selection', () => {
     )
 
     expect(selectPreferredDownloadCandidates(filtered, config)).toEqual([{ filename: 'book.pdf' }])
+  })
+})
+
+describe('archive format selection', () => {
+  it('archives the first available archive format while excluding the selected primary extension', () => {
+    const config = resolveConfig({
+      archiveRoot: 'Archive',
+      defaultLibrary: 'comics',
+      routes: [
+        {
+          id: 'comic-bundles',
+          library: 'comics',
+          bundleTitlePatterns: [String.raw`\bcomics?\s+bundle\b`],
+        },
+      ],
+      libraries: {
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz', 'pdf'],
+          archiveFormats: ['pdf', 'epub'],
+          extInclude: ['cbz', 'pdf', 'epub'],
+        },
+      },
+    })
+    const context = {
+      bundleTitle: 'Humble Comics Bundle: Example',
+      productTitle: 'Issue 1',
+    }
+    const candidates = [
+      { filename: 'issue.cbz', platform: 'ebook', url: 'https://example.invalid/issue.cbz' },
+      { filename: 'issue.pdf', platform: 'ebook', url: 'https://example.invalid/issue.pdf' },
+      { filename: 'issue.epub', platform: 'ebook', url: 'https://example.invalid/issue.epub' },
+    ]
+    const selected = selectRoutedDownloadCandidates(candidates, config, context)
+
+    expect(selected.map(({ candidate }) => candidate.filename)).toEqual(['issue.cbz'])
+    expect(
+      selectArchiveDownloadCandidates(candidates, selected, config, context, 'order-1').map(
+        ({ candidate, archiveCacheKey }) => [candidate.filename, archiveCacheKey]
+      )
+    ).toEqual([['issue.pdf', 'archive:order-1:issue.pdf']])
+  })
+
+  it('archives only lower alternate formats when pdf is the primary fallback preference', () => {
+    const config = resolveConfig({
+      archiveRoot: 'Archive',
+      defaultLibrary: 'comics',
+      libraries: {
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz', 'pdf'],
+          archiveFormats: ['pdf', 'epub'],
+          extInclude: ['cbz', 'pdf', 'epub'],
+        },
+      },
+    })
+    const context = {
+      bundleTitle: 'Bundle',
+      productTitle: 'Product',
+    }
+    const candidates = [
+      { filename: 'issue.pdf', platform: 'ebook', url: 'https://example.invalid/issue.pdf' },
+      { filename: 'issue.epub', platform: 'ebook', url: 'https://example.invalid/issue.epub' },
+    ]
+    const selected = selectRoutedDownloadCandidates(candidates, config, context)
+
+    expect(selected.map(({ candidate }) => candidate.filename)).toEqual(['issue.pdf'])
+    expect(
+      selectArchiveDownloadCandidates(candidates, selected, config, context).map(
+        ({ candidate }) => candidate.filename
+      )
+    ).toEqual(['issue.epub'])
+  })
+
+  it('does not archive when archive settings are absent or primary selection fell back to all', () => {
+    const context = {
+      bundleTitle: 'Bundle',
+      productTitle: 'Product',
+    }
+    const candidates = [
+      { filename: 'issue.pdf', platform: 'ebook', url: 'https://example.invalid/issue.pdf' },
+      { filename: 'issue.epub', platform: 'ebook', url: 'https://example.invalid/issue.epub' },
+    ]
+    const noArchiveConfig = resolveConfig({
+      formatPriority: ['pdf'],
+      extInclude: ['pdf', 'epub'],
+    })
+    const fallbackConfig = resolveConfig({
+      archiveRoot: 'Archive',
+      defaultLibrary: 'comics',
+      libraries: {
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz'],
+          archiveFormats: ['pdf', 'epub'],
+          extInclude: ['pdf', 'epub'],
+        },
+      },
+    })
+
+    const noArchiveSelected = selectRoutedDownloadCandidates(candidates, noArchiveConfig, context)
+    const fallbackSelected = selectRoutedDownloadCandidates(candidates, fallbackConfig, context)
+
+    expect(
+      selectArchiveDownloadCandidates(candidates, noArchiveSelected, noArchiveConfig, context)
+    ).toEqual([])
+    expect(fallbackSelected.map(({ candidate }) => candidate.filename)).toEqual([
+      'issue.pdf',
+      'issue.epub',
+    ])
+    expect(
+      selectArchiveDownloadCandidates(candidates, fallbackSelected, fallbackConfig, context)
+    ).toEqual([])
+  })
+
+  it('applies library include filters before archive selection', () => {
+    const config = resolveConfig({
+      archiveRoot: 'Archive',
+      defaultLibrary: 'comics',
+      libraries: {
+        comics: {
+          path: 'Comics',
+          formatPriority: ['cbz', 'pdf'],
+          archiveFormats: ['pdf', 'epub'],
+          extInclude: ['cbz', 'pdf'],
+        },
+      },
+    })
+    const context = {
+      bundleTitle: 'Bundle',
+      productTitle: 'Product',
+    }
+    const candidates = [
+      { filename: 'issue.cbz', platform: 'ebook', url: 'https://example.invalid/issue.cbz' },
+      { filename: 'issue.pdf', platform: 'ebook', url: 'https://example.invalid/issue.pdf' },
+      { filename: 'issue.epub', platform: 'ebook', url: 'https://example.invalid/issue.epub' },
+    ]
+    const selected = selectRoutedDownloadCandidates(candidates, config, context)
+
+    expect(
+      selectArchiveDownloadCandidates(candidates, selected, config, context).map(
+        ({ candidate }) => candidate.filename
+      )
+    ).toEqual(['issue.pdf'])
   })
 })
 

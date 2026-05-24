@@ -8,11 +8,26 @@ export type CacheEntry = {
 }
 
 export type PdfCbzCacheEntry = {
+  version?: 1
+  libraryName?: string
+  libraryPath?: string
+  pdfKey?: string
+  pdfOriginalPath?: string
   pdfMtimeMs: number
   pdfSize: number
   cbzPath: string
+  cbzMtimeMs?: number
+  cbzSize?: number
+  archivePdfPath?: string
+  archiveStatus?: 'not-configured' | 'moved' | 'duplicate-removed' | 'conflict' | 'kept'
+  archiveConflictReason?: string
   lastGeneratedMs: number
+  imageCount?: number
+  renderFallbackUsed?: boolean
   comicInfoPreserved?: boolean
+  comicInfoGenerated?: boolean
+  comicInfoMerged?: boolean
+  comicInfoFields?: string[]
 }
 
 export type PdfFileStats = {
@@ -165,15 +180,49 @@ export function setPdfCbzEntry(cache: CacheData, pdfKey: string, entry: PdfCbzCa
   cache.transforms.pdf.cbz.entries[pdfKey] = entry
 }
 
+export function getPdfCbzEntries(cache: CacheData): Array<[string, PdfCbzCacheEntry]> {
+  return Object.entries(cache.transforms?.pdf?.cbz?.entries ?? {})
+}
+
+function sameResolvedPath(left: string | undefined, right: string): boolean {
+  return left ? path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase() : false
+}
+
+export function findPdfCbzEntryByCbzPath(
+  cache: CacheData,
+  cbzPath: string
+): PdfCbzCacheEntry | undefined {
+  return getPdfCbzEntries(cache).find(([, entry]) => sameResolvedPath(entry.cbzPath, cbzPath))?.[1]
+}
+
+export function isPdfCbzTransformForSource(
+  entry: PdfCbzCacheEntry | undefined,
+  sourcePdfPath: string
+): boolean {
+  return Boolean(
+    entry &&
+    (sameResolvedPath(entry.pdfOriginalPath, sourcePdfPath) ||
+      sameResolvedPath(entry.archivePdfPath, sourcePdfPath) ||
+      entry.pdfKey === sourcePdfPath)
+  )
+}
+
 export function shouldRegeneratePdfCbz(
   entry: PdfCbzCacheEntry | undefined,
   stats: PdfFileStats,
-  force: boolean
+  force: boolean,
+  cbzStats?: PdfFileStats
 ): boolean {
   if (force || !entry) {
     return true
   }
-  return entry.pdfMtimeMs !== stats.mtimeMs || entry.pdfSize !== stats.size
+  if (entry.pdfMtimeMs !== stats.mtimeMs || entry.pdfSize !== stats.size) {
+    return true
+  }
+  if (entry.cbzSize !== undefined || entry.cbzMtimeMs !== undefined) {
+    return !cbzStats || entry.cbzSize !== cbzStats.size || entry.cbzMtimeMs !== cbzStats.mtimeMs
+  }
+  return false
 }
 
 export async function loadCache(libraryPath: string, cachePath?: string): Promise<CacheData> {

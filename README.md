@@ -15,6 +15,7 @@ After that it will only download the content that has been updated or is missing
 - optional filter by file types using an include _or_ exclude list _(`--include/--exclude` flag)_
 - optional filter by platform types like video, ebook, etc... _(`--platform` flag)_
 - audit an existing library to rebuild the cache _(`hbd audit`)_
+- enrich local EPUB/PDF metadata for publisher-aware organization _(`hbd enrich-metadata`)_
 - validate config, libraries, routing, cache, and auth _(`hbd doctor`)_
 - organize existing files into their routed library _(`hbd organize`)_
 - remove empty folders left after moves _(`hbd cleanup`)_
@@ -78,6 +79,7 @@ C:\Users\me\Dropbox\Media\.hbd\
   cache.json
   download-failures.json
   metadata.json
+  enriched-metadata.json
 ```
 
 When running from inside the media root, the CLI auto-discovers
@@ -91,6 +93,32 @@ defaults are:
 - `comics`: `cbz`, then `pdf`, then `epub`, then `mobi`
 - `manga`: `cbz`, then `pdf`, then `epub`, then `mobi`
 - `books`: `epub`, then `pdf`, then `mobi`
+
+To keep non-preferred alternates in a separate tree, set a global
+`archiveRoot` and per-library `archiveFormats`. The archive mirrors each
+configured library path under the archive root and uses the same bundle or flat
+layout as that library. A top-level `layout` sets the default for all
+configured libraries; a library-level `layout` can still override it:
+
+```json
+{
+  "layout": "flat",
+  "archiveRoot": "F:/storage/media-archive",
+  "libraries": {
+    "comics": {
+      "path": "Comics/comics",
+      "formatPriority": ["cbz", "pdf"],
+      "extInclude": ["cbz", "pdf", "epub"],
+      "archiveFormats": ["pdf", "epub"]
+    }
+  }
+}
+```
+
+With this setup, a product with CBZ, PDF, and EPUB downloads stores CBZ in the
+comic library and PDF in the archive. If CBZ is unavailable, PDF becomes the
+library copy and EPUB is archived. CBZ is never archived unless it is listed in
+`archiveFormats`.
 
 When named libraries exist, `config init` also adds routes. Routes are evaluated
 per selected download candidate. Earlier routes take precedence, so broad bundle
@@ -189,8 +217,11 @@ bun run hbd organize
 ```
 
 `organize` reads `.hbd/metadata.json`, so run `audit` or `download` first after
-config changes. It is a dry run by default and only fixes files that are in the
-wrong routed library. To actually move files:
+config changes. If a configured library resolves to `layout: "flat"` and
+`.hbd/enriched-metadata.json` exists, `organize` also uses high-confidence
+local publisher metadata. It is a dry run by default and only fixes files that
+are in the wrong routed library or wrong configured layout. To actually move
+files:
 
 ```powershell
 bun run hbd organize --apply --report-path ".hbd/organize-report.json"
@@ -199,8 +230,9 @@ bun run hbd organize --apply --report-path ".hbd/organize-report.json"
 Add `--canonical` if you also want files already inside the right library moved
 into the standard bundle/product folder layout.
 
-Add `--flat` to organize products into publisher/series folders instead of
-bundle/product folders:
+Set top-level `"layout": "flat"` in config to organize configured libraries into
+publisher/series folders by default. Add `--flat` as a one-run override when
+using a bundle-layout config or CLI-only library:
 
 ```powershell
 bun run hbd organize --flat --apply
@@ -210,14 +242,31 @@ Flat organize infers publishers from bundle titles such as `by O'Reilly` or
 `by Image Comics`; products with no inferred publisher are placed under
 `humble`. Repeated products across bundles are collapsed, while different file
 formats for the same product are kept. When applied from a config-backed run,
-configured libraries are marked with `layout: "flat"` so future downloads use
-the same structure and skip already satisfied duplicate products. Config-backed
-flat libraries default conflict handling to `prefer-known-md5-then-largest`, and
+the config is marked with top-level `layout: "flat"` so future downloads use the
+same structure and skip already satisfied duplicate products. Config-backed flat
+libraries default conflict handling to `prefer-known-md5-then-largest`, and
 `organize --flat --apply` writes
 `"flatConflictResolution": "prefer-known-md5-then-largest"` when the field is
 absent. Override a single run with `--resolve-conflicts report`,
 `prefer-flat`, `prefer-largest`, `prefer-md5-match`, `prefer-known-md5`, or
 `prefer-known-md5-then-largest`.
+
+Build or refresh local enriched metadata before flat organization:
+
+```powershell
+bun run hbd enrich-metadata
+```
+
+`enrich-metadata` scans all supported `.epub`, `.pdf`, and `.cbz` files under
+configured scan libraries. If `archiveRoot` and per-library `archiveFormats`
+are configured, it also scans those mirrored archive folders so archived
+alternate formats can enrich the same product metadata. V1 extracts EPUB OPF and
+PDF XMP/Info metadata, skips CBZ metadata extraction, and writes a separate
+local sidecar. When multiple files disagree, accepted metadata is ranked by
+source confidence and agreement, with conflicts recorded in the sidecar.
+Configured runs store it at `.hbd/enriched-metadata.json`; CLI-only runs default
+to `<library-path>/.enriched-metadata.json`. To ignore the sidecar during
+organization, add `--no-enriched-metadata`.
 
 Preview empty folders that can be removed from configured library roots:
 
@@ -259,6 +308,10 @@ bun run hbd cleanup --apply --report-path ".hbd/cleanup-report.json"
   available. Configured runs store it at `.hbd/metadata.json`; CLI-only runs
   default to `<library-path>/.metadata.json`. Signed download URLs and auth
   secrets are not stored.
+
+- `enrich-metadata` writes an `enriched-metadata.json` sidecar with validated
+  local file metadata. It is separate from `metadata.json` and can be
+  regenerated without changing the Humble catalog snapshot.
 
 - Use `--help` with all `hbd` commands to see available options
 - Find supported platforms for the `--platform` flag by visiting your Humble Bundle Library
@@ -349,17 +402,28 @@ using `--session-auth` or `--cookie-file` when running commands.
 ### PDF → CBZ conversion
 
 The TypeScript CLI includes a `pdf2cbz` command to convert comic PDFs into CBZ archives.
-When a PDF changes (mtime/size), the cache entry under `transforms.pdf.cbz` is refreshed and
-the CBZ is regenerated.
+When a PDF or generated CBZ changes (mtime/size), the cache entry under
+`transforms.pdf.cbz` is refreshed and the CBZ is regenerated.
 
 ```bash
 bun run hbd pdf2cbz "./library/**/*.pdf"
+bun run hbd pdf2cbz --config .hbd/config.json --library comics
 ```
 
 Input resolution accepts a single PDF path, a directory (recursively scanned for PDFs), or
 glob patterns containing `*`/`?`. Output defaults to each PDF’s directory with a `.cbz`
 extension, or you can pass `--out <dir>` to write CBZs into a specific folder using the
 PDF’s basename.
+
+If no path or glob is provided, `pdf2cbz` runs in library mode. Library mode resolves the
+active configured library (for example `--library comics` or `--library manga`), converts all
+PDFs physically under that library root, and writes transform manifest entries to the shared
+cache. If `archiveRoot` is configured, successfully converted source PDFs are moved to the
+archive mirror for that library. If the archive target already exists with the same size, the
+source PDF is removed as a duplicate; if the size differs, the source PDF is kept and the
+transform entry records an archive conflict.
+
+Path/glob mode keeps its original local-conversion behavior and does not move source PDFs.
 
 Use `--dry-run` to preview actions without writing CBZs or touching the cache.
 If a CBZ is regenerated, any existing `ComicInfo.xml` stored at the archive root is preserved

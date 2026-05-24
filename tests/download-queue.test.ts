@@ -469,6 +469,124 @@ describe('downloadQueue', () => {
     }
   })
 
+  it('downloads the preferred archive alternate under the mirrored bundle library path', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const mediaRoot = path.join(temporaryDirectory, 'Media')
+    const comicsPath = path.join(mediaRoot, 'Comics', 'comics')
+    const archiveRoot = path.join(temporaryDirectory, 'Media Archive')
+    const cachePath = path.join(mediaRoot, '.hbd', 'cache.json')
+    const failureReportPath = path.join(mediaRoot, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Humble Comics Bundle: Example',
+        },
+        subproducts: [
+          {
+            human_name: 'Issue 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  { url: { web: 'https://example.com/issue.cbz' } },
+                  { url: { web: 'https://example.com/issue.pdf' } },
+                  { url: { web: 'https://example.com/issue.epub' } },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+
+    globalThis.fetch = async (input) => new Response(String(input))
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          mediaRoot,
+          archiveRoot,
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              formatPriority: ['cbz', 'pdf'],
+              archiveFormats: ['pdf', 'epub'],
+              extInclude: ['cbz', 'pdf', 'epub'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(2)
+      expect(
+        await readFile(
+          path.join(comicsPath, 'Humble Comics Bundle - Example', 'Issue 1', 'issue.cbz'),
+          'utf8'
+        )
+      ).toBe('https://example.com/issue.cbz')
+      expect(
+        await readFile(
+          path.join(
+            archiveRoot,
+            'Comics',
+            'comics',
+            'Humble Comics Bundle - Example',
+            'Issue 1',
+            'issue.pdf'
+          ),
+          'utf8'
+        )
+      ).toBe('https://example.com/issue.pdf')
+      await expect(
+        access(
+          path.join(
+            archiveRoot,
+            'Comics',
+            'comics',
+            'Humble Comics Bundle - Example',
+            'Issue 1',
+            'issue.epub'
+          )
+        )
+      ).rejects.toThrow()
+      await expect(
+        access(
+          path.join(
+            archiveRoot,
+            'Comics',
+            'comics',
+            'Humble Comics Bundle - Example',
+            'Issue 1',
+            'issue.cbz'
+          )
+        )
+      ).rejects.toThrow()
+
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as Record<string, unknown>
+      expect(cache['order-1:issue.cbz']).toEqual({ urlLastModified: expect.any(String) })
+      expect(cache['archive:order-1:issue.pdf']).toEqual({ urlLastModified: expect.any(String) })
+      expect(cache['archive:order-1:issue.epub']).toBeUndefined()
+      expect(cache['order-1:issue.pdf']).toBeUndefined()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('lets bundle title routes outrank generic extension routes', async () => {
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
     const comicsPath = path.join(temporaryDirectory, 'Comics')
@@ -1116,6 +1234,179 @@ describe('downloadQueue', () => {
             ],
           },
         },
+      })
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('downloads flat archive alternates into mirrored publisher series folders', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const mediaRoot = path.join(temporaryDirectory, 'Media')
+    const comicsPath = path.join(mediaRoot, 'Comics')
+    const archiveRoot = path.join(temporaryDirectory, 'Archive')
+    const cachePath = path.join(mediaRoot, '.hbd', 'cache.json')
+    const failureReportPath = path.join(mediaRoot, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async () => ({
+        product: {
+          human_name: 'Humble Comics Bundle: Saga by Image Comics',
+        },
+        subproducts: [
+          {
+            human_name: 'Saga Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  { url: { web: 'https://example.com/files/saga_vol1.cbz' } },
+                  { url: { web: 'https://example.com/files/saga_vol1.pdf' } },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+    globalThis.fetch = async (input) => new Response(String(input))
+
+    try {
+      await downloadLibrary({
+        client,
+        config: resolveConfig({
+          mediaRoot,
+          archiveRoot,
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['cbz', 'pdf'],
+              formatPriority: ['cbz'],
+              archiveFormats: ['pdf'],
+            },
+          },
+        }),
+      })
+
+      expect(
+        await readFile(path.join(comicsPath, 'Image Comics', 'Saga', 'saga_vol1.cbz'), 'utf8')
+      ).toBe('https://example.com/files/saga_vol1.cbz')
+      expect(
+        await readFile(
+          path.join(archiveRoot, 'Comics', 'Image Comics', 'Saga', 'saga_vol1.pdf'),
+          'utf8'
+        )
+      ).toBe('https://example.com/files/saga_vol1.pdf')
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as Record<string, unknown>
+      expect(cache['archive:order-1:saga_vol1.pdf']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache['flat:comics:saga_vol_1:saga_vol1.pdf']).toBeUndefined()
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('dedupes repeated flat archive alternates during the same download run', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-download-'))
+    const mediaRoot = path.join(temporaryDirectory, 'Media')
+    const comicsPath = path.join(mediaRoot, 'Comics')
+    const archiveRoot = path.join(temporaryDirectory, 'Archive')
+    const cachePath = path.join(mediaRoot, '.hbd', 'cache.json')
+    const failureReportPath = path.join(mediaRoot, '.hbd', 'download-failures.json')
+    const client: ApiClient = {
+      session: {},
+      fetchJson: async () => {
+        throw new Error('Unexpected fetchJson call')
+      },
+      fetchText: async () => {
+        throw new Error('Unexpected fetchText call')
+      },
+      getLibraryPage: async () => '',
+      getOrderDetails: async (orderId) => ({
+        product: {
+          human_name:
+            orderId === 'order-1'
+              ? 'Humble Comics Bundle: Saga by Image Comics'
+              : 'Humble Conquer COVID-19 Bundle',
+        },
+        subproducts: [
+          {
+            human_name: 'Saga Vol. 1',
+            downloads: [
+              {
+                platform: 'ebook',
+                download_struct: [
+                  { url: { web: 'https://example.com/files/saga_vol1.cbz' } },
+                  { url: { web: 'https://example.com/files/saga_vol1.pdf' } },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      getTroveProducts: async () => [],
+      signTroveDownload: async () => ({}),
+    }
+    const downloadedUrls: string[] = []
+    globalThis.fetch = async (input) => {
+      downloadedUrls.push(String(input))
+      return new Response(String(input))
+    }
+
+    try {
+      const summary = await downloadLibrary({
+        client,
+        config: resolveConfig({
+          mediaRoot,
+          archiveRoot,
+          defaultLibrary: 'comics',
+          cachePath,
+          failureReportPath,
+          purchaseKeys: ['order-1', 'order-2'],
+          libraries: {
+            comics: {
+              path: comicsPath,
+              layout: 'flat',
+              extInclude: ['cbz', 'pdf'],
+              formatPriority: ['cbz'],
+              archiveFormats: ['pdf'],
+            },
+          },
+        }),
+      })
+
+      expect(summary.queued).toBe(2)
+      expect(downloadedUrls).toEqual([
+        'https://example.com/files/saga_vol1.cbz',
+        'https://example.com/files/saga_vol1.pdf',
+      ])
+      expect(
+        await readFile(
+          path.join(archiveRoot, 'Comics', 'Image Comics', 'Saga', 'saga_vol1.pdf'),
+          'utf8'
+        )
+      ).toBe('https://example.com/files/saga_vol1.pdf')
+      const cache = JSON.parse(await readFile(cachePath, 'utf8')) as Record<string, unknown>
+      expect(cache['archive:order-1:saga_vol1.pdf']).toEqual({
+        urlLastModified: expect.any(String),
+      })
+      expect(cache['archive:order-2:saga_vol1.pdf']).toEqual({
+        urlLastModified: expect.any(String),
       })
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true })

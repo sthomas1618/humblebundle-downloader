@@ -7,7 +7,10 @@ import { describe, expect, it } from 'bun:test'
 import {
   buildProductFolder,
   buildTroveFolder,
+  canonicalPublisherFolderName,
   cleanName,
+  cleanPublisherName,
+  collectPublisherFolderCandidates,
   comparableTitle,
   ensureDirectory,
   findExistingPublisherFolders,
@@ -25,6 +28,14 @@ describe('fs utils', () => {
     expect(cleanName('Hello_World-[2024].')).toBe('Hello_World-[2024]')
     expect(cleanName('..Leading/Trailing...')).toBe('..LeadingTrailing')
     expect(cleanName('Taylor & Francis')).toBe('Taylor Francis')
+  })
+
+  it('cleans publisher names while preserving meaningful ampersands', () => {
+    expect(cleanPublisherName('Simon & Schuster')).toBe('Simon & Schuster')
+    expect(cleanPublisherName('CRC Press: Taylor & Francis Group LLC')).toBe(
+      'CRC Press - Taylor & Francis Group LLC'
+    )
+    expect(cleanName('Simon & Schuster')).toBe('Simon Schuster')
   })
 
   it('builds product folder paths', () => {
@@ -55,7 +66,8 @@ describe('fs utils', () => {
     expect(inferPublisherFolder('Bushcraft & Homestead Handbook Series by Adams Media')).toBe(
       'Adams Media'
     )
-    expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor Francis')
+    expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor & Francis')
+    expect(inferPublisherFolder('Book Bundle by Simon & Schuster')).toBe('Simon & Schuster')
     expect(inferPublisherFolder('Humble Book Bundle: Python and Security')).toBe('humble')
     expect(inferPublisherFolder('Humble Comic Bundle: The Best Year of BOOM! Studios')).toBe(
       'BOOM Studios'
@@ -93,6 +105,45 @@ describe('fs utils', () => {
     )
   })
 
+  it('infers publisher names from existing flat publisher folder candidates', () => {
+    const candidates = ['Top Cow', 'BOOM', 'Oni Press', 'Titan']
+
+    expect(inferPublisherFolder('Humble Comics Bundle: Top Cow Classics', candidates)).toBe(
+      'Top Cow'
+    )
+    expect(inferPublisherFolder('Humble Comics Bundle: Oni Press Showcase', candidates)).toBe(
+      'Oni Press'
+    )
+    expect(inferPublisherFolder('Humble Comics Bundle: Titan Comics Showcase', candidates)).toBe(
+      'Titan'
+    )
+    expect(
+      inferPublisherFolder('Humble Manga Bundle: Attack on Titan Final Season', candidates)
+    ).toBe('humble')
+  })
+
+  it('collects existing flat publisher folders as candidate names', async () => {
+    const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'hbd-fs-test-'))
+
+    try {
+      const comicsPath = path.join(temporaryRoot, 'Comics')
+      const booksPath = path.join(temporaryRoot, 'Books')
+      await ensureDirectory(path.join(comicsPath, 'Top Cow', 'Series', 'book.cbz'))
+      await ensureDirectory(path.join(comicsPath, 'humble', 'Series', 'book.cbz'))
+      await ensureDirectory(path.join(comicsPath, 'Mega Bundle', 'Series', 'book.cbz'))
+      await ensureDirectory(path.join(booksPath, 'Oni Press', 'Series', 'book.epub'))
+
+      await expect(
+        collectPublisherFolderCandidates([
+          { path: comicsPath, layout: 'flat' },
+          { path: booksPath, layout: 'bundle' },
+        ])
+      ).resolves.toEqual(['Top Cow'])
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  })
+
   it('does not infer publishers from generic bundle families', () => {
     expect(inferPublisherFolder('Humble Book Bundle: Be the Change')).toBe('humble')
     expect(inferPublisherFolder('Humble Comics Bundle: Heroes of Indie Comics')).toBe('humble')
@@ -116,6 +167,37 @@ describe('fs utils', () => {
     )
     expect(normalizePublisherFamilyKey('BOOM! Studios')).toBe(normalizePublisherFamilyKey('BOOM'))
     expect(normalizePublisherFamilyKey('BOOM Studios')).toBe(normalizePublisherFamilyKey('BOOM!'))
+    expect(normalizePublisherFamilyKey('Packt Publishing Pvt Ltd')).toBe(
+      normalizePublisherFamilyKey('Packt')
+    )
+    expect(normalizePublisherFamilyKey('Packt Publishing Pvt. Ltd')).toBe(
+      normalizePublisherFamilyKey('Packt')
+    )
+    expect(normalizePublisherFamilyKey('The Quarto Group')).toBe(
+      normalizePublisherFamilyKey('Quarto')
+    )
+    expect(normalizePublisherFamilyKey('Titan Books')).toBe(normalizePublisherFamilyKey('Titan'))
+    expect(normalizePublisherFamilyKey('Titan Press')).toBe(normalizePublisherFamilyKey('Titan'))
+    expect(normalizePublisherFamilyKey('Titan Publishers')).toBe(
+      normalizePublisherFamilyKey('Titan')
+    )
+    expect(normalizePublisherFamilyKey('Kodansha Comics')).toBe(
+      normalizePublisherFamilyKey('Kodansha')
+    )
+  })
+
+  it('canonicalizes publisher folder names with generic cleanup rules', () => {
+    expect(canonicalPublisherFolderName('The Quarto Group')).toBe('Quarto')
+    expect(canonicalPublisherFolderName('Apress Berkeley CA')).toBe('Apress')
+    expect(canonicalPublisherFolderName('Titan Books')).toBe('Titan')
+    expect(canonicalPublisherFolderName('Titan Press')).toBe('Titan Press')
+    expect(canonicalPublisherFolderName('Titan Publishers')).toBe('Titan')
+    expect(canonicalPublisherFolderName('Search Press')).toBe('Search Press')
+    expect(canonicalPublisherFolderName('C T Publishing Inc')).toBe('C T Publishing')
+    expect(canonicalPublisherFolderName('CRC Press Taylor & Francis Group LLC')).toBe(
+      'CRC Press Taylor & Francis Group'
+    )
+    expect(canonicalPublisherFolderName('Kodansha Comics')).toBe('Kodansha')
   })
 
   it('infers publisher-focused bundle phrases without named publisher rules', () => {

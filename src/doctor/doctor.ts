@@ -49,6 +49,8 @@ export type DoctorCacheSummary = {
   cacheExists: boolean
   cacheEntries: number
   transformEntries: number
+  transformArchiveConflicts: number
+  invalidTransformEntries: string[]
   invalidEntries: string[]
   legacyCachePaths: string[]
   failureReportPath: string
@@ -112,6 +114,29 @@ function cacheEntries(cache: CacheData): Array<[string, CacheEntry]> {
 
 function countTransformEntries(cache: CacheData): number {
   return Object.keys(cache.transforms?.pdf?.cbz?.entries ?? {}).length
+}
+
+function countTransformArchiveConflicts(cache: CacheData): number {
+  return Object.values(cache.transforms?.pdf?.cbz?.entries ?? {}).filter(
+    (entry) => entry.archiveStatus === 'conflict'
+  ).length
+}
+
+function validateTransformEntries(cache: CacheData): string[] {
+  const invalidEntries: string[] = []
+  for (const [key, entry] of Object.entries(cache.transforms?.pdf?.cbz?.entries ?? {})) {
+    if (
+      !entry ||
+      typeof entry !== 'object' ||
+      typeof entry.pdfMtimeMs !== 'number' ||
+      typeof entry.pdfSize !== 'number' ||
+      typeof entry.cbzPath !== 'string' ||
+      typeof entry.lastGeneratedMs !== 'number'
+    ) {
+      invalidEntries.push(key)
+    }
+  }
+  return invalidEntries
 }
 
 function validateCacheEntries(cache: CacheData): string[] {
@@ -448,10 +473,12 @@ async function validateDeepCache(options: {
         (validation.routing.routeCounts[route.routeId] ?? 0) + 1
     }
 
+    const satisfiedByTransform = Boolean(item.transformEntry && item.localPath)
+
     if (item.cacheEntry && !item.localPath) {
       validation.cachedButMissing.push(problem)
     }
-    if (!item.cacheEntry && item.localPath) {
+    if (!item.cacheEntry && item.localPath && !satisfiedByTransform) {
       validation.localButUncached.push(problem)
     }
     if (!item.cacheEntry && !item.localPath) {
@@ -460,7 +487,7 @@ async function validateDeepCache(options: {
     if (item.localPath && !isPathInside(item.expectedLibraryPath, item.localPath)) {
       validation.wrongLibrary.push(problem)
     }
-    if (item.localPath && typeof item.expectedSize === 'number') {
+    if (item.localPath && typeof item.expectedSize === 'number' && !satisfiedByTransform) {
       const stats = await stat(item.localPath)
       if (stats.size !== item.expectedSize) {
         validation.sizeMismatches.push({
@@ -469,7 +496,7 @@ async function validateDeepCache(options: {
         })
       }
     }
-    if (options.hash && item.localPath && item.expectedMd5) {
+    if (options.hash && item.localPath && item.expectedMd5 && !satisfiedByTransform) {
       const actualMd5 = await md5File(item.localPath)
       if (actualMd5 !== item.expectedMd5) {
         validation.hashMismatches.push({
@@ -592,6 +619,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       cacheExists: false,
       cacheEntries: 0,
       transformEntries: 0,
+      transformArchiveConflicts: 0,
+      invalidTransformEntries: [],
       invalidEntries: [],
       legacyCachePaths: [],
       failureReportPath,
@@ -642,6 +671,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     cache = cacheRead.data as CacheData
     report.cache.cacheEntries = cacheEntries(cache).length
     report.cache.transformEntries = countTransformEntries(cache)
+    report.cache.transformArchiveConflicts = countTransformArchiveConflicts(cache)
+    report.cache.invalidTransformEntries = validateTransformEntries(cache)
     report.cache.invalidEntries = validateCacheEntries(cache)
     addCheck(
       report,
@@ -656,6 +687,22 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
         'info',
         'Cache',
         `Transform cache entries: ${report.cache.transformEntries}.`
+      )
+    }
+    if (report.cache.transformArchiveConflicts > 0) {
+      addCheck(
+        report,
+        'warn',
+        'Cache',
+        `Transform archive conflicts: ${report.cache.transformArchiveConflicts}.`
+      )
+    }
+    if (report.cache.invalidTransformEntries.length > 0) {
+      addCheck(
+        report,
+        'fail',
+        'Cache',
+        `Invalid transform entry shapes: ${report.cache.invalidTransformEntries.length}.`
       )
     }
     if (report.cache.invalidEntries.length > 0) {

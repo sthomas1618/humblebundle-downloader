@@ -38,6 +38,10 @@ export function applyCommonOptions(command: Command, options: CommonOptions): vo
     '--metadata-path <path>',
     'Metadata snapshot file path (defaults to <library-path>/.metadata.json)'
   )
+  command.option(
+    '--enriched-metadata-path <path>',
+    'Enriched metadata sidecar path (defaults to <library-path>/.enriched-metadata.json)'
+  )
   if (includeUpdate) {
     command.option('-u, --update', 'Check for updates (still download new products)')
   }

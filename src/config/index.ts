@@ -6,16 +6,20 @@ const CONFIG_FILE = 'config.json'
 const DEFAULT_CACHE_PATH = `${APP_HOME_DIR}/cache.json`
 const DEFAULT_FAILURE_REPORT_PATH = `${APP_HOME_DIR}/download-failures.json`
 const DEFAULT_METADATA_PATH = `${APP_HOME_DIR}/metadata.json`
+const DEFAULT_ENRICHED_METADATA_PATH = `${APP_HOME_DIR}/enriched-metadata.json`
 const CONFIG_VERSION = 1
 const CONFIG_ENV_VAR = 'HBD_CONFIG'
 
 const topLevelConfigKeys = new Set([
   'version',
   'defaultLibrary',
+  'layout',
   'flatConflictResolution',
   'cachePath',
   'failureReportPath',
   'metadataPath',
+  'enrichedMetadataPath',
+  'archiveRoot',
   'routes',
   'libraries',
 ])
@@ -32,6 +36,7 @@ const libraryConfigKeys = new Set([
   'path',
   'layout',
   'formatPriority',
+  'archiveFormats',
   'extInclude',
   'extExclude',
   'platformInclude',
@@ -75,6 +80,7 @@ export type LibraryPreferences = {
   extInclude?: string[]
   extExclude?: string[]
   formatPriority?: string[]
+  archiveFormats?: string[]
   troveOnly?: boolean
   showProgress?: boolean
 }
@@ -97,12 +103,15 @@ export type ConfigFileOverrides = {
   configPath: string
   mediaRoot: string
   defaultLibrary: string
+  layout?: LibraryLayout
   flatConflictResolution?: ConflictResolutionMode
   libraries: Record<string, LibraryPreferences>
   routes: LibraryRoute[]
   cachePath?: string
   failureReportPath?: string
   metadataPath?: string
+  enrichedMetadataPath?: string
+  archiveRoot?: string
 }
 
 export type LoadedConfigFile = {
@@ -121,6 +130,8 @@ export type AppConfig = {
   mediaRoot?: string
   /** Active configured library name selected for downloads. */
   libraryName?: string
+  /** Default library layout for configured libraries. */
+  layout?: LibraryLayout
   /** Default conflict resolution mode for config-backed flat organize runs. */
   flatConflictResolution?: ConflictResolutionMode
   /** Whether scan libraries came from a named config file. */
@@ -143,6 +154,10 @@ export type AppConfig = {
   failureReportPath?: string
   /** Optional Humble catalog metadata snapshot path. */
   metadataPath?: string
+  /** Optional local file-derived metadata sidecar path. */
+  enrichedMetadataPath?: string
+  /** Optional root where non-primary archive formats are mirrored. */
+  archiveRoot?: string
   /** Only download Humble Trove content. */
   troveOnly: boolean
   /** Whether to show per-item progress indicators. */
@@ -157,6 +172,8 @@ export type AppConfig = {
   extExclude?: string[]
   /** Preferred download extensions in priority order. */
   formatPriority?: string[]
+  /** Archive download extensions for the active library. */
+  archiveFormats?: string[]
   /** Only download items from specific purchase keys. */
   purchaseKeys?: string[]
   /** Skip remote metadata lookups during audit. */
@@ -167,6 +184,7 @@ export type ConfigOverrides = {
   configPath?: string
   mediaRoot?: string
   defaultLibrary?: string
+  layout?: LibraryLayout
   flatConflictResolution?: ConflictResolutionMode
   libraryName?: string
   libraries?: Record<string, LibraryPreferences>
@@ -178,6 +196,8 @@ export type ConfigOverrides = {
   cachePath?: string
   failureReportPath?: string
   metadataPath?: string
+  enrichedMetadataPath?: string
+  archiveRoot?: string
   troveOnly?: boolean
   showProgress?: boolean
   updateOnly?: boolean
@@ -185,6 +205,7 @@ export type ConfigOverrides = {
   extInclude?: string[]
   extExclude?: string[]
   formatPriority?: string[]
+  archiveFormats?: string[]
   purchaseKeys?: string[]
   offlineAudit?: boolean
 }
@@ -197,10 +218,13 @@ export type ConfigInitLibrary = {
 export type ConfigInitOptions = {
   mediaRoot: string
   defaultLibrary: string
+  layout?: LibraryLayout
   libraries: ConfigInitLibrary[]
   cachePath?: string
   failureReportPath?: string
   metadataPath?: string
+  enrichedMetadataPath?: string
+  archiveRoot?: string
 }
 
 export type ConfigInitResult = {
@@ -211,10 +235,13 @@ export type ConfigInitResult = {
 type ConfigFileJson = {
   version: number
   defaultLibrary: string
+  layout?: LibraryLayout
   flatConflictResolution?: ConflictResolutionMode
   cachePath?: string
   failureReportPath?: string
   metadataPath?: string
+  enrichedMetadataPath?: string
+  archiveRoot?: string
   routes?: LibraryRoute[]
   libraries: Record<string, LibraryPreferences>
 }
@@ -317,7 +344,8 @@ function getMediaRootForConfig(configPath: string): string {
 function normalizeLibraryPreferences(
   name: string,
   value: unknown,
-  mediaRoot: string
+  mediaRoot: string,
+  defaultLayout: LibraryLayout
 ): LibraryPreferences {
   if (!isObject(value)) {
     throw new Error(`Config library "${name}" must be an object.`)
@@ -330,7 +358,7 @@ function normalizeLibraryPreferences(
   const libraryPath = assertString(value.path, `libraries.${name}.path`)
   return {
     path: resolveConfigPathValue(libraryPath, mediaRoot) ?? libraryPath,
-    layout: assertLibraryLayout(value.layout, `libraries.${name}.layout`) ?? 'bundle',
+    layout: assertLibraryLayout(value.layout, `libraries.${name}.layout`) ?? defaultLayout,
     platformInclude: normalizeValues(
       assertStringArray(value.platformInclude, `libraries.${name}.platformInclude`)
     ),
@@ -342,6 +370,9 @@ function normalizeLibraryPreferences(
     ),
     formatPriority: normalizeValues(
       assertStringArray(value.formatPriority, `libraries.${name}.formatPriority`)
+    ),
+    archiveFormats: normalizeValues(
+      assertStringArray(value.archiveFormats, `libraries.${name}.archiveFormats`)
     ),
     troveOnly: assertBoolean(value.troveOnly, `libraries.${name}.troveOnly`),
     showProgress: assertBoolean(value.showProgress, `libraries.${name}.showProgress`),
@@ -464,6 +495,7 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
   }
 
   const defaultLibrary = assertString(data.defaultLibrary, 'defaultLibrary')
+  const layout = assertLibraryLayout(data.layout, 'layout') ?? 'bundle'
   const flatConflictResolution = assertConflictResolutionMode(
     data.flatConflictResolution,
     'flatConflictResolution'
@@ -477,7 +509,7 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
     if (!name) {
       throw new Error('Config library names must be non-empty.')
     }
-    libraries[name] = normalizeLibraryPreferences(name, library, mediaRoot)
+    libraries[name] = normalizeLibraryPreferences(name, library, mediaRoot, layout)
   }
 
   if (Object.keys(libraries).length === 0) {
@@ -508,14 +540,28 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
         : assertString(data.metadataPath, 'metadataPath'),
       mediaRoot
     ) ?? path.join(path.dirname(configPath), 'metadata.json')
+  const enrichedMetadataPath =
+    resolveConfigPathValue(
+      data.enrichedMetadataPath === undefined
+        ? DEFAULT_ENRICHED_METADATA_PATH
+        : assertString(data.enrichedMetadataPath, 'enrichedMetadataPath'),
+      mediaRoot
+    ) ?? path.join(path.dirname(configPath), 'enriched-metadata.json')
+  const archiveRoot =
+    data.archiveRoot === undefined
+      ? undefined
+      : resolveConfigPathValue(assertString(data.archiveRoot, 'archiveRoot'), mediaRoot)
 
   return {
     version: CONFIG_VERSION,
     defaultLibrary,
+    layout,
     flatConflictResolution,
     cachePath,
     failureReportPath,
     metadataPath,
+    enrichedMetadataPath,
+    archiveRoot,
     routes,
     libraries,
   }
@@ -586,12 +632,15 @@ export async function loadConfigFile(configPath: string): Promise<LoadedConfigFi
       configPath: resolvedConfigPath,
       mediaRoot,
       defaultLibrary: configFile.defaultLibrary,
+      layout: configFile.layout,
       flatConflictResolution: configFile.flatConflictResolution,
       libraries: configFile.libraries,
       routes: configFile.routes ?? [],
       cachePath: configFile.cachePath,
       failureReportPath: configFile.failureReportPath,
       metadataPath: configFile.metadataPath,
+      enrichedMetadataPath: configFile.enrichedMetadataPath,
+      archiveRoot: configFile.archiveRoot,
     },
   }
 }
@@ -761,6 +810,7 @@ export async function createConfigFile(options: ConfigInitOptions): Promise<Conf
   const config: ConfigFileJson = {
     version: CONFIG_VERSION,
     defaultLibrary: options.defaultLibrary,
+    layout: options.layout,
     cachePath: formatConfigPathForWrite(options.cachePath ?? DEFAULT_CACHE_PATH, mediaRoot),
     failureReportPath: formatConfigPathForWrite(
       options.failureReportPath ?? DEFAULT_FAILURE_REPORT_PATH,
@@ -770,6 +820,13 @@ export async function createConfigFile(options: ConfigInitOptions): Promise<Conf
       options.metadataPath ?? DEFAULT_METADATA_PATH,
       mediaRoot
     ),
+    enrichedMetadataPath: formatConfigPathForWrite(
+      options.enrichedMetadataPath ?? DEFAULT_ENRICHED_METADATA_PATH,
+      mediaRoot
+    ),
+    archiveRoot: options.archiveRoot
+      ? formatConfigPathForWrite(options.archiveRoot, mediaRoot)
+      : undefined,
     routes: defaultRoutesForLibraries(libraries),
     libraries,
   }
@@ -789,26 +846,26 @@ export async function markConfigLibrariesFlat(configPath: string): Promise<void>
     throw new Error('Config field "libraries" must be an object.')
   }
 
-  for (const library of Object.values(data.libraries)) {
-    library.layout = 'flat'
-  }
+  data.layout = 'flat'
   data.flatConflictResolution ??= FLAT_CONFLICT_RESOLUTION_DEFAULT
 
   await writeFile(configPath, `${JSON.stringify(data, undefined, 2)}\n`)
 }
 
 function normalizeLibraryMap(
-  libraries?: Record<string, LibraryPreferences>
+  libraries?: Record<string, LibraryPreferences>,
+  defaultLayout: LibraryLayout = 'bundle'
 ): Record<string, LibraryPreferences> {
   const normalized: Record<string, LibraryPreferences> = {}
   for (const [name, library] of Object.entries(libraries ?? {})) {
     normalized[name] = {
       path: library.path,
-      layout: library.layout ?? 'bundle',
+      layout: library.layout ?? defaultLayout,
       platformInclude: normalizeValues(library.platformInclude),
       extInclude: normalizeValues(library.extInclude),
       extExclude: normalizeValues(library.extExclude),
       formatPriority: normalizeValues(library.formatPriority),
+      archiveFormats: normalizeValues(library.archiveFormats),
       troveOnly: library.troveOnly,
       showProgress: library.showProgress,
     }
@@ -862,7 +919,8 @@ function buildScanLibraries(
  */
 export function resolveConfig(overrides: ConfigOverrides): AppConfig {
   const defaultFormatPriority = ['cbz', 'epub', 'pdf', 'mobi']
-  const libraries = normalizeLibraryMap(overrides.libraries)
+  const rootLayout = overrides.layout ?? 'bundle'
+  const libraries = normalizeLibraryMap(overrides.libraries, rootLayout)
   const hasConfiguredLibraries = Object.keys(libraries).length > 0
   const activeLibraryName = hasConfiguredLibraries
     ? (overrides.libraryName ?? overrides.defaultLibrary)
@@ -881,7 +939,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
   const activeLibrary = activeLibraryName ? libraries[activeLibraryName] : undefined
   const libraryPath = overrides.libraryPath ?? activeLibrary?.path ?? 'Downloaded Library'
   const effectiveConfig = {
-    layout: activeLibrary?.layout ?? 'bundle',
+    layout: activeLibrary?.layout ?? rootLayout,
     platformInclude: normalizeValues(overrides.platformInclude) ?? activeLibrary?.platformInclude,
     extInclude: normalizeValues(overrides.extInclude) ?? activeLibrary?.extInclude,
     extExclude: normalizeValues(overrides.extExclude) ?? activeLibrary?.extExclude,
@@ -889,6 +947,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
       normalizeValues(overrides.formatPriority) ??
       activeLibrary?.formatPriority ??
       defaultFormatPriority,
+    archiveFormats: normalizeValues(overrides.archiveFormats) ?? activeLibrary?.archiveFormats,
     troveOnly: overrides.troveOnly ?? activeLibrary?.troveOnly ?? false,
     showProgress: overrides.showProgress ?? activeLibrary?.showProgress ?? false,
   }
@@ -904,6 +963,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     configPath: overrides.configPath,
     mediaRoot: overrides.mediaRoot,
     libraryName: activeLibraryName,
+    layout: overrides.layout,
     flatConflictResolution: overrides.flatConflictResolution,
     hasConfiguredLibraries,
     routes,
@@ -915,6 +975,8 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     cachePath: overrides.cachePath,
     failureReportPath: overrides.failureReportPath,
     metadataPath: overrides.metadataPath,
+    enrichedMetadataPath: overrides.enrichedMetadataPath,
+    archiveRoot: overrides.archiveRoot,
     troveOnly: effectiveConfig.troveOnly,
     showProgress: effectiveConfig.showProgress,
     updateOnly: overrides.updateOnly ?? false,
@@ -922,6 +984,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     extInclude: effectiveConfig.extInclude,
     extExclude: effectiveConfig.extExclude,
     formatPriority: effectiveConfig.formatPriority,
+    archiveFormats: effectiveConfig.archiveFormats,
     purchaseKeys: overrides.purchaseKeys,
     offlineAudit: overrides.offlineAudit ?? false,
   }
