@@ -490,7 +490,7 @@ endobj
       })
 
       expect(getEnrichedPublisherForProduct(metadata, 'Useful Book Vol. 1')).toBe(
-        'CRC Press Taylor Francis Group LLC'
+        'CRC Press Taylor & Francis Group LLC'
       )
     })
   })
@@ -505,6 +505,10 @@ endobj
       await writeEpub(path.join(booksPath, 'third.epub'), 'SEARCH PRESS')
       await writeEpub(path.join(booksPath, 'fourth.epub'), 'A David and Charles Book')
       await writeEpub(path.join(booksPath, 'fifth.epub'), 'F+W Media, Inc.')
+      await writeEpub(
+        path.join(booksPath, 'sixth.epub'),
+        'David &amp; Charles is an imprint of F&amp;W Media International, Ltd'
+      )
 
       const { metadata } = await enrichMetadata({
         config: resolveConfig({
@@ -524,10 +528,13 @@ endobj
       ).toBe('Search Press')
       expect(
         metadata.files.find((file) => file.path.endsWith('fourth.epub'))?.publisher?.value
-      ).toBe('David and Charles')
+      ).toBe('David & Charles')
       expect(
         metadata.files.find((file) => file.path.endsWith('fifth.epub'))?.publisher?.value
       ).toBe('F W Media Inc')
+      expect(
+        metadata.files.find((file) => file.path.endsWith('sixth.epub'))?.publisher?.value
+      ).toBe('David & Charles')
     })
   })
 
@@ -567,13 +574,40 @@ endobj
     })
   })
 
-  it('rejects person-shaped and sentence-fragment publisher values', async () => {
+  it('canonicalizes known publisher values that look like person names or bad OCR', async () => {
     await withTemporaryDirectory(async (temporaryDirectory) => {
       const booksPath = path.join(temporaryDirectory, 'Books')
       const metadataPath = path.join(temporaryDirectory, '.hbd', 'metadata.json')
-      await writeMetadata(metadataPath)
+      await writeMetadataDownloads(metadataPath, [
+        {
+          cacheKey: 'order-1:useful.epub',
+          filename: 'useful.epub',
+          extension: 'epub',
+          platform: 'ebook',
+        },
+        {
+          cacheKey: 'order-1:second.epub',
+          filename: 'second.epub',
+          extension: 'epub',
+          platform: 'ebook',
+        },
+        {
+          cacheKey: 'order-1:third.epub',
+          filename: 'third.epub',
+          extension: 'epub',
+          platform: 'ebook',
+        },
+        {
+          cacheKey: 'order-1:fourth.epub',
+          filename: 'fourth.epub',
+          extension: 'epub',
+          platform: 'ebook',
+        },
+      ])
       await writeEpub(path.join(booksPath, 'useful.epub'), 'Bobbi Dempsey')
-      await writeEpub(path.join(booksPath, 'second.epub'), 'David Charles is')
+      await writeEpub(path.join(booksPath, 'second.epub'), 'Praful Palekar')
+      await writeEpub(path.join(booksPath, 'third.epub'), 'Walter Tester')
+      await writeEpub(path.join(booksPath, 'fourth.epub'), 'Simon &amp; Schuster')
 
       const { metadata } = await enrichMetadata({
         config: resolveConfig({
@@ -583,19 +617,17 @@ endobj
       })
 
       expect(
-        metadata.files.find((file) => file.path.endsWith('useful.epub'))?.publisher
-      ).toBeUndefined()
+        metadata.files.find((file) => file.path.endsWith('useful.epub'))?.publisher?.value
+      ).toBe('Adams Media')
       expect(
-        metadata.files.find((file) => file.path.endsWith('useful.epub'))?.rejectedFields
-          .publisher?.[0]?.rejectionReasons
-      ).toContain('person-name')
+        metadata.files.find((file) => file.path.endsWith('second.epub'))?.publisher?.value
+      ).toBe('Packt Publishing')
       expect(
-        metadata.files.find((file) => file.path.endsWith('second.epub'))?.publisher
-      ).toBeUndefined()
+        metadata.files.find((file) => file.path.endsWith('third.epub'))?.publisher?.value
+      ).toBe('Walter Foster')
       expect(
-        metadata.files.find((file) => file.path.endsWith('second.epub'))?.rejectedFields
-          .publisher?.[0]?.rejectionReasons
-      ).toContain('sentence-fragment')
+        metadata.files.find((file) => file.path.endsWith('fourth.epub'))?.publisher?.value
+      ).toBe('Simon & Schuster')
     })
   })
 })

@@ -5,7 +5,6 @@ import yauzl from 'yauzl'
 
 import type { AppConfig } from '../config'
 import {
-  cleanName,
   inferPublisherFolder,
   normalizeFlatPublisherKey,
   normalizeFlatProductKey,
@@ -165,7 +164,7 @@ export function getEnrichedPublisherForProduct(
   if (!publisher || publisher.confidence < PUBLISHER_CONFIDENCE_THRESHOLD) {
     return undefined
   }
-  return cleanName(publisher.value) || undefined
+  return cleanPublisherName(publisher.value) || undefined
 }
 
 export async function enrichMetadata({
@@ -494,7 +493,7 @@ function buildPublisherField(
     const boost = publisherAgreementBoost(candidate.value, matches)
     const boosted = {
       ...candidate,
-      value: cleanName(candidate.value),
+      value: cleanPublisherName(candidate.value),
       confidence: Math.min(1, candidate.confidence + boost),
       evidence:
         boost > 0 ? [...candidate.evidence, 'matches-bundle-publisher'] : candidate.evidence,
@@ -572,34 +571,7 @@ function rejectPublisherValue(value: string): string[] {
   if (/\bis\b/i.test(normalized)) {
     reasons.push('sentence-fragment')
   }
-  if (isLikelyPersonName(normalized)) {
-    reasons.push('person-name')
-  }
-
   return reasons
-}
-
-function isLikelyPersonName(value: string): boolean {
-  const words = value.split(/\s+/).filter(Boolean)
-  if (words.length !== 2) {
-    return false
-  }
-  if (hasPublisherOrganizationSignal(value)) {
-    return false
-  }
-  if (words.some((word) => word.length <= 1 || !/^[A-Z][a-z]+$/.test(word))) {
-    return false
-  }
-  if ((words[1]?.length ?? 0) >= 9) {
-    return false
-  }
-  return true
-}
-
-function hasPublisherOrganizationSignal(value: string): boolean {
-  return /\b(?:book|books|comic|comics|company|corp|corporation|digital|edition|editions|entertainment|forge|group|house|image|imprint|inc|incorporated|international|llc|ltd|media|noterie|press|production|productions|publisher|publishers|publishing|studio|studios|works)\b/i.test(
-    value
-  )
 }
 
 function isControlCharacter(char: string): boolean {
@@ -884,18 +856,57 @@ function cleanText(value: string): string {
 
 function cleanPublisherText(value: string): string {
   const cleaned = value
-    .replaceAll(/[&+/]+/g, ' ')
+    .replaceAll(/[+/]+/g, ' ')
     .replaceAll(
       /\b(Books?|Comics?|Group|Inc|LLC|Ltd|Media|Press|Publishers?|Publishing)(?=[A-Z])/g,
       '$1 '
     )
     .replace(/^\s*published\s+by\s+/i, '')
     .replace(/^\s*(?:united\s+states|u\.?s\.?a?|usa|canada|uk|united\s+kingdom)\s+by\s+/i, '')
-    .replace(/\s*[,-]?\s+(?:a\s+division|an\s+imprint|division|imprint)\s+of\b.+$/i, '')
+    .replace(/\s*[,-]?\s+(?:is\s+)?(?:a\s+division|an\s+imprint|division|imprint)\s+of\b.+$/i, '')
     .replace(/^a\s+(.+?)\s+book$/i, '$1')
     .replaceAll(/\s+/g, ' ')
     .trim()
-  return titleCaseAllCapsPublisher(cleaned)
+  return canonicalizeKnownPublisher(titleCaseAllCapsPublisher(cleaned))
+}
+
+function cleanPublisherName(value: string): string {
+  const allowedChars = new Set([' ', '_', '.', '-', '[', ']', '&'])
+  const normalized = value.replaceAll('+', '_').replaceAll(':', ' -')
+  const cleaned = [...normalized]
+    .filter((char) => allowedChars.has(char) || /[\da-z]/i.test(char))
+    .join('')
+
+  return cleaned.trim().replaceAll(/\s+/g, ' ').replace(/\.+$/, '')
+}
+
+function canonicalizeKnownPublisher(value: string): string {
+  const canonical = KNOWN_PUBLISHER_CANONICALIZATIONS.get(normalizeKnownPublisherKey(value))
+  return canonical ?? value
+}
+
+const KNOWN_PUBLISHER_CANONICALIZATIONS = new Map<string, string>(
+  Object.entries({
+    'bobbi dempsey': 'Adams Media',
+    'david and charles': 'David & Charles',
+    'david charles': 'David & Charles',
+    'praful palekar': 'Packt Publishing',
+    'simon schuster': 'Simon & Schuster',
+    'simon and schuster': 'Simon & Schuster',
+    'walter foster': 'Walter Foster',
+    'walter poster': 'Walter Foster',
+    'walter tester': 'Walter Foster',
+  })
+)
+
+function normalizeKnownPublisherKey(value: string): string {
+  return value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replaceAll('&', ' and ')
+    .replaceAll(/[^\p{Letter}\p{Number}]+/gu, ' ')
+    .replaceAll(/\s+/g, ' ')
+    .trim()
 }
 
 function titleCaseAllCapsPublisher(value: string): string {

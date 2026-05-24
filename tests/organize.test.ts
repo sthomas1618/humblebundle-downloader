@@ -3723,7 +3723,12 @@ describe('organizeLibrary', () => {
       ).toBe('manga')
       expect(
         await readFile(
-          path.join(booksPath, 'Taylor Francis', '3D Game Environments', '3dgameenvironments.prc'),
+          path.join(
+            booksPath,
+            'Taylor & Francis',
+            '3D Game Environments',
+            '3dgameenvironments.prc'
+          ),
           'utf8'
         )
       ).toBe('taylor')

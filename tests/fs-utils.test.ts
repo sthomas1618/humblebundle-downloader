@@ -9,6 +9,7 @@ import {
   buildTroveFolder,
   canonicalPublisherFolderName,
   cleanName,
+  cleanPublisherName,
   collectPublisherFolderCandidates,
   comparableTitle,
   ensureDirectory,
@@ -27,6 +28,14 @@ describe('fs utils', () => {
     expect(cleanName('Hello_World-[2024].')).toBe('Hello_World-[2024]')
     expect(cleanName('..Leading/Trailing...')).toBe('..LeadingTrailing')
     expect(cleanName('Taylor & Francis')).toBe('Taylor Francis')
+  })
+
+  it('cleans publisher names while preserving meaningful ampersands', () => {
+    expect(cleanPublisherName('Simon & Schuster')).toBe('Simon & Schuster')
+    expect(cleanPublisherName('CRC Press: Taylor & Francis Group LLC')).toBe(
+      'CRC Press - Taylor & Francis Group LLC'
+    )
+    expect(cleanName('Simon & Schuster')).toBe('Simon Schuster')
   })
 
   it('builds product folder paths', () => {
@@ -57,7 +66,8 @@ describe('fs utils', () => {
     expect(inferPublisherFolder('Bushcraft & Homestead Handbook Series by Adams Media')).toBe(
       'Adams Media'
     )
-    expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor Francis')
+    expect(inferPublisherFolder('Game Programming by Taylor & Francis')).toBe('Taylor & Francis')
+    expect(inferPublisherFolder('Book Bundle by Simon & Schuster')).toBe('Simon & Schuster')
     expect(inferPublisherFolder('Humble Book Bundle: Python and Security')).toBe('humble')
     expect(inferPublisherFolder('Humble Comic Bundle: The Best Year of BOOM! Studios')).toBe(
       'BOOM Studios'
@@ -184,8 +194,8 @@ describe('fs utils', () => {
     expect(canonicalPublisherFolderName('Titan Publishers')).toBe('Titan')
     expect(canonicalPublisherFolderName('Search Press')).toBe('Search Press')
     expect(canonicalPublisherFolderName('C T Publishing Inc')).toBe('C T Publishing')
-    expect(canonicalPublisherFolderName('CRC Press Taylor Francis Group LLC')).toBe(
-      'CRC Press Taylor Francis Group'
+    expect(canonicalPublisherFolderName('CRC Press Taylor & Francis Group LLC')).toBe(
+      'CRC Press Taylor & Francis Group'
     )
     expect(canonicalPublisherFolderName('Kodansha Comics')).toBe('Kodansha')
   })

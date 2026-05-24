@@ -25,6 +25,20 @@ export function cleanName(dirtyName: string): string {
   return cleaned.trim().replaceAll(/\s+/g, ' ').replace(/\.+$/, '')
 }
 
+export function cleanPublisherName(dirtyName: string): string {
+  const allowedChars = new Set([' ', '_', '.', '-', '[', ']', '&'])
+  const normalized = dirtyName.replaceAll('+', '_').replaceAll(':', ' -')
+  const cleaned = [...normalized]
+    .filter((char) => {
+      const isAllowed = allowedChars.has(char)
+      const isAlphaNumeric = /[\da-z]/i.test(char)
+      return isAllowed || isAlphaNumeric
+    })
+    .join('')
+
+  return cleaned.trim().replaceAll(/\s+/g, ' ').replace(/\.+$/, '')
+}
+
 export function comparableTitle(title: string): string {
   return title
     .normalize('NFKD')
@@ -132,7 +146,7 @@ function inferBuiltInPublisherFolder(bundleTitle: string): string | undefined {
 }
 
 function cleanPublisherCandidateName(value: string): string {
-  return cleanName(value.replace(/\s*(?:'s|\u2019s)\s*$/i, ''))
+  return cleanPublisherName(value.replace(/\s*(?:'s|\u2019s)\s*$/i, ''))
 }
 
 function uniquePublisherCandidates(publisherFolderCandidates: string[]): string[] {
@@ -143,7 +157,7 @@ function uniquePublisherCandidates(publisherFolderCandidates: string[]): string[
     }
     const familyKey = normalizePublisherFamilyKey(candidate)
     if (!candidates.has(familyKey)) {
-      candidates.set(familyKey, cleanName(candidate))
+      candidates.set(familyKey, cleanPublisherName(candidate))
     }
   }
   return [...candidates.values()]
@@ -243,7 +257,7 @@ export function inferPublisherFolder(
     inferColonPublisher(title) ??
     'humble'
 
-  return cleanName(inferredPublisher) || 'humble'
+  return cleanPublisherName(inferredPublisher) || 'humble'
 }
 
 const PUBLISHER_SUFFIX_WORDS = new Set([
@@ -334,7 +348,7 @@ const CANONICAL_PUBLISHER_LEGAL_SUFFIX_WORDS = new Set([
 ])
 
 export function canonicalPublisherFolderName(publisherFolder: string): string {
-  const cleaned = cleanName(publisherFolder)
+  const cleaned = cleanPublisherName(publisherFolder)
   const tokens = cleaned.split(/\s+/).filter(Boolean)
   const hadLeadingThe = tokens[0]?.toLowerCase() === 'the'
   if (hadLeadingThe && tokens.length > 1) {
@@ -378,7 +392,7 @@ function isLegacyBundleLikePublisherFolder(publisherFolder: string): boolean {
 }
 
 function isPublisherFolderCandidate(publisherFolder: string): boolean {
-  const cleaned = cleanName(publisherFolder)
+  const cleaned = cleanPublisherName(publisherFolder)
   const key = normalizeFlatPublisherKey(cleaned)
   const familyKey = normalizePublisherFamilyKey(cleaned)
   if (!cleaned || !familyKey || familyKey === 'humble') {
