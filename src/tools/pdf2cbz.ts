@@ -5,11 +5,14 @@ import path from 'node:path'
 import {
   collectImages,
   createCbz,
+  getPdfPageCount,
   mergeComicInfoXml,
   naturalSort,
   readComicInfoXml,
+  removeImages,
   runPdfImages,
   runPdfRender,
+  validatePdfImageSet,
   type ComicInfoFields,
 } from './pdf2cbz-helpers'
 
@@ -28,6 +31,9 @@ export type Pdf2CbzResult = {
   temporaryDirectory: string
   imageCount: number
   usedRenderFallback: boolean
+  conversionMode: 'extracted' | 'rendered'
+  pageCount: number
+  validationWarnings: string[]
   comicInfoPreserved: boolean
   comicInfoGenerated: boolean
   comicInfoMerged: boolean
@@ -41,6 +47,8 @@ export async function convertPdfToCbz(
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-pdf2cbz-'))
   const outputPrefix = path.join(temporaryDirectory, 'page')
   let usedRenderFallback = false
+  let conversionMode: 'extracted' | 'rendered' = 'extracted'
+  let validationWarnings: string[] = []
   let preservedComicInfo: Buffer | undefined
 
   try {
@@ -50,18 +58,41 @@ export async function convertPdfToCbz(
       // ignore missing ComicInfo.xml
     }
 
-    await runPdfImages(pdfPath, outputPrefix)
-    let images = await collectImages(temporaryDirectory)
+    const pageCount = await getPdfPageCount(pdfPath)
+    let images: string[] = []
 
-    if (images.length === 0 && options.renderFallback) {
+    if (options.renderFallback) {
       usedRenderFallback = true
+      conversionMode = 'rendered'
       const tool = options.renderTool ?? 'pdftoppm'
       await runPdfRender(pdfPath, temporaryDirectory, tool)
       images = await collectImages(temporaryDirectory)
+    } else {
+      await runPdfImages(pdfPath, outputPrefix)
+      images = await collectImages(temporaryDirectory)
+      const extractedValidation = validatePdfImageSet(images, pageCount, {
+        requireReaderSafeFormats: true,
+      })
+
+      if (!extractedValidation.valid) {
+        validationWarnings = extractedValidation.reasons
+        await removeImages(temporaryDirectory)
+        usedRenderFallback = true
+        conversionMode = 'rendered'
+        await runPdfRender(pdfPath, temporaryDirectory, 'pdftoppm')
+        images = await collectImages(temporaryDirectory)
+      }
     }
 
     if (images.length === 0) {
       throw new Error('No embedded images found; PDF may be vector/text-only or protected.')
+    }
+
+    const finalValidation = validatePdfImageSet(images, pageCount)
+    if (!finalValidation.valid) {
+      throw new Error(
+        `Generated image set failed validation: ${finalValidation.reasons.join('; ')}.`
+      )
     }
 
     images.sort((a, b) => naturalSort(path.basename(a), path.basename(b)))
@@ -73,6 +104,9 @@ export async function convertPdfToCbz(
       temporaryDirectory,
       imageCount: images.length,
       usedRenderFallback,
+      conversionMode,
+      pageCount,
+      validationWarnings,
       comicInfoPreserved: comicInfo.preserved,
       comicInfoGenerated: comicInfo.generated,
       comicInfoMerged: comicInfo.merged,
