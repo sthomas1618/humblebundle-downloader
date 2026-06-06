@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+import { resolveCommandConfig } from '../src/cli/utils/config'
 import {
   createConfigFile,
   discoverConfigPath,
@@ -28,6 +29,43 @@ async function writeConfig(directory: string, data: unknown): Promise<string> {
 }
 
 describe('config file loading', () => {
+  it('preserves configured transform fields when CLI overrides one transform field', async () => {
+    await withTemporaryDirectory(async (mediaRoot) => {
+      const configPath = await writeConfig(mediaRoot, {
+        version: 1,
+        defaultLibrary: 'comics',
+        transform: {
+          trackLocalProducts: false,
+          archiveLocalProducts: false,
+          pdf2cbzConcurrency: 2,
+          pdf2cbzArchiveMode: 'only',
+        },
+        libraries: {
+          comics: {
+            path: 'Comics/comics',
+          },
+        },
+      })
+      const command = {
+        error(message: string): never {
+          throw new Error(message)
+        },
+      }
+
+      const resolved = await resolveCommandConfig(command as never, {
+        config: configPath,
+        pdf2cbzConcurrency: 4,
+      })
+
+      expect(resolved.config.transform).toEqual({
+        trackLocalProducts: false,
+        archiveLocalProducts: false,
+        pdf2cbzConcurrency: 4,
+        pdf2cbzArchiveMode: 'only',
+      })
+    })
+  })
+
   it('loads valid v1 config and resolves paths against the media root', async () => {
     await withTemporaryDirectory(async (mediaRoot) => {
       const configPath = await writeConfig(mediaRoot, {
@@ -39,6 +77,12 @@ describe('config file loading', () => {
         metadataPath: '.hbd/metadata.json',
         enrichedMetadataPath: '.hbd/enriched-metadata.json',
         archiveRoot: 'Media Archive',
+        transform: {
+          trackLocalProducts: false,
+          archiveLocalProducts: true,
+          pdf2cbzConcurrency: 3,
+          pdf2cbzArchiveMode: 'skip',
+        },
         flatConflictResolution: 'prefer-known-md5-then-largest',
         routes: [{ extensions: ['EPUB', 'MOBI'], library: 'books' }],
         libraries: {
@@ -69,6 +113,12 @@ describe('config file loading', () => {
         metadataPath: path.join(mediaRoot, '.hbd', 'metadata.json'),
         enrichedMetadataPath: path.join(mediaRoot, '.hbd', 'enriched-metadata.json'),
         archiveRoot: path.join(mediaRoot, 'Media Archive'),
+        transform: {
+          trackLocalProducts: false,
+          archiveLocalProducts: true,
+          pdf2cbzConcurrency: 3,
+          pdf2cbzArchiveMode: 'skip',
+        },
         flatConflictResolution: 'prefer-known-md5-then-largest',
         routes: [{ extensions: ['epub', 'mobi'], library: 'books' }],
         libraries: {
@@ -173,6 +223,30 @@ describe('config file loading', () => {
           routes: [{ extensions: ['epub'], library: 'comics', unknown: true }],
           libraries: { comics: { path: 'Comics' } },
         },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          transform: { unknown: true },
+          libraries: { comics: { path: 'Comics' } },
+        },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          transform: { trackLocalProducts: 'yes' },
+          libraries: { comics: { path: 'Comics' } },
+        },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          transform: { pdf2cbzConcurrency: 0 },
+          libraries: { comics: { path: 'Comics' } },
+        },
+        {
+          version: 1,
+          defaultLibrary: 'comics',
+          transform: { pdf2cbzArchiveMode: 'later' },
+          libraries: { comics: { path: 'Comics' } },
+        },
       ]
 
       for (const [index, config] of cases.entries()) {
@@ -250,6 +324,12 @@ describe('config init', () => {
         failureReportPath: '.hbd/download-failures.json',
         metadataPath: '.hbd/metadata.json',
         enrichedMetadataPath: '.hbd/enriched-metadata.json',
+        transform: {
+          trackLocalProducts: true,
+          archiveLocalProducts: true,
+          pdf2cbzConcurrency: 2,
+          pdf2cbzArchiveMode: 'after',
+        },
         routes: [
           {
             id: 'manga-bundles',

@@ -1,14 +1,16 @@
 import { createWriteStream } from 'node:fs'
-import { access, readdir } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { access, readdir, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 
 import yauzl from 'yauzl'
 import { ZipFile } from 'yazl'
 
-import { runCommand } from '../utils/command'
+import { runCommand, runCommandOutput } from '../utils/command'
 import { ensureDirectory } from '../utils/fs'
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.jp2', '.tif', '.tiff'])
+const READER_SAFE_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png'])
 const COMIC_INFO_FIELD_ORDER = ['Title', 'Series', 'Publisher', 'Notes'] as const
 
 export type ComicInfoFieldName = (typeof COMIC_INFO_FIELD_ORDER)[number]
@@ -23,6 +25,19 @@ export type ComicInfoResult = {
   merged: boolean
 }
 
+export type PdfImageSetValidation = {
+  valid: boolean
+  pageCount: number
+  imageCount: number
+  reasons: string[]
+}
+
+export type CbzImageSetInspection = {
+  imageCount: number
+  imageExtensions: string[]
+  entries: string[]
+}
+
 export function naturalSort(a: string, b: string): number {
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
   return collator.compare(a, b)
@@ -30,6 +45,15 @@ export function naturalSort(a: string, b: string): number {
 
 export async function runPdfImages(pdfPath: string, outputPrefix: string): Promise<void> {
   await runCommand('pdfimages', ['-all', pdfPath, outputPrefix])
+}
+
+export async function getPdfPageCount(pdfPath: string): Promise<number> {
+  const output = await runCommandOutput('pdfinfo', [pdfPath])
+  const match = output.match(/^pages:\s+(\d+)\s*$/im)
+  if (!match) {
+    throw new Error('Unable to determine PDF page count with pdfinfo.')
+  }
+  return Number.parseInt(match[1], 10)
 }
 
 export async function runPdfRender(
@@ -51,6 +75,100 @@ export async function collectImages(directory: string): Promise<string[]> {
   return entries
     .filter((entry) => IMAGE_EXTENSIONS.has(path.extname(entry).toLowerCase()))
     .map((entry) => path.join(directory, entry))
+}
+
+export async function removeImages(directory: string): Promise<void> {
+  const images = await collectImages(directory)
+  await Promise.all(images.map((image) => rm(image, { force: true })))
+}
+
+export function validatePdfImageSet(
+  imagePaths: string[],
+  pageCount: number,
+  options: { requireReaderSafeFormats?: boolean } = {}
+): PdfImageSetValidation {
+  const reasons: string[] = []
+  if (imagePaths.length !== pageCount) {
+    reasons.push(`expected ${pageCount} page image(s), found ${imagePaths.length}`)
+  }
+
+  if (options.requireReaderSafeFormats) {
+    const unsafeExtensions = [
+      ...new Set(
+        imagePaths
+          .map((imagePath) => path.extname(imagePath).toLowerCase())
+          .filter((extension) => !READER_SAFE_IMAGE_EXTENSIONS.has(extension))
+      ),
+    ].sort(naturalSort)
+    if (unsafeExtensions.length > 0) {
+      reasons.push(`reader-unsafe image format(s): ${unsafeExtensions.join(', ')}`)
+    }
+  }
+
+  return {
+    valid: reasons.length === 0,
+    pageCount,
+    imageCount: imagePaths.length,
+    reasons,
+  }
+}
+
+export async function inspectCbzImageSet(cbzPath: string): Promise<CbzImageSetInspection> {
+  return await new Promise<CbzImageSetInspection>((resolve, reject) => {
+    yauzl.open(cbzPath, { lazyEntries: true }, (error, zipfile) => {
+      if (error || !zipfile) {
+        reject(error ?? new Error('Unable to open CBZ.'))
+        return
+      }
+
+      const entries: string[] = []
+      const extensions = new Set<string>()
+
+      function close(): void {
+        zipfile.close()
+      }
+
+      zipfile.on('error', (zipError) => {
+        close()
+        reject(zipError)
+      })
+
+      zipfile.on('entry', (entry) => {
+        const extension = path.extname(entry.fileName).toLowerCase()
+        if (IMAGE_EXTENSIONS.has(extension)) {
+          entries.push(entry.fileName)
+          extensions.add(extension)
+        }
+        zipfile.readEntry()
+      })
+
+      zipfile.on('end', () => {
+        close()
+        resolve({
+          imageCount: entries.length,
+          imageExtensions: [...extensions].sort(naturalSort),
+          entries,
+        })
+      })
+
+      zipfile.readEntry()
+    })
+  })
+}
+
+export async function validateCbzAgainstPdf(
+  pdfPath: string,
+  cbzPath: string
+): Promise<PdfImageSetValidation & { imageExtensions: string[] }> {
+  const pageCount = await getPdfPageCount(pdfPath)
+  const inspection = await inspectCbzImageSet(cbzPath)
+  const validation = validatePdfImageSet(inspection.entries, pageCount, {
+    requireReaderSafeFormats: true,
+  })
+  return {
+    ...validation,
+    imageExtensions: inspection.imageExtensions,
+  }
 }
 
 export function normalizeEntryName(index: number, extension: string): string {
@@ -141,27 +259,61 @@ export async function createCbz(
   comicInfo?: Buffer
 ): Promise<void> {
   await ensureDirectory(cbzPath)
-  await new Promise<void>((resolve, reject) => {
-    const zip = new ZipFile()
-    const output = createWriteStream(cbzPath)
-    output.on('error', reject)
-    zip.outputStream.on('error', reject)
-    zip.outputStream.pipe(output).on('close', resolve)
+  const temporaryPath = path.join(
+    path.dirname(cbzPath),
+    `.${path.basename(cbzPath)}.${process.pid}.${randomUUID()}.tmp`
+  )
 
-    let index = 0
-    for (const imagePath of imagePaths) {
-      index += 1
-      const extension = path.extname(imagePath)
-      const entryName = normalizeEntryName(index, extension)
-      zip.addFile(imagePath, entryName, { compress: false })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const zip = new ZipFile()
+      const output = createWriteStream(temporaryPath)
+      let settled = false
+
+      function fail(error: Error): void {
+        if (settled) {
+          return
+        }
+        settled = true
+        zip.outputStream.unpipe(output)
+        output.destroy()
+        reject(error)
+      }
+
+      output.on('error', fail)
+      output.on('close', () => {
+        if (!settled) {
+          settled = true
+          resolve()
+        }
+      })
+      zip.on('error', fail)
+      zip.outputStream.on('error', fail)
+      zip.outputStream.pipe(output)
+
+      let index = 0
+      for (const imagePath of imagePaths) {
+        index += 1
+        const extension = path.extname(imagePath)
+        const entryName = normalizeEntryName(index, extension)
+        zip.addFile(imagePath, entryName, { compress: false })
+      }
+
+      if (comicInfo) {
+        zip.addBuffer(comicInfo, 'ComicInfo.xml', { compress: false })
+      }
+
+      zip.end()
+    })
+    await rename(temporaryPath, cbzPath)
+  } catch (error) {
+    try {
+      await rm(temporaryPath, { force: true })
+    } catch {
+      // Preserve the original archive creation error.
     }
-
-    if (comicInfo) {
-      zip.addBuffer(comicInfo, 'ComicInfo.xml', { compress: false })
-    }
-
-    zip.end()
-  })
+    throw error
+  }
 }
 
 export async function readComicInfoXml(cbzPath: string): Promise<Buffer | undefined> {
@@ -216,8 +368,12 @@ export async function readComicInfoXml(cbzPath: string): Promise<Buffer | undefi
 
 export const pdf2cbzTestUtils = {
   buildComicInfoXml,
+  getPdfPageCount,
+  inspectCbzImageSet,
   mergeComicInfoXml,
   naturalSort,
   normalizeEntryName,
   readComicInfoXml,
+  validateCbzAgainstPdf,
+  validatePdfImageSet,
 }

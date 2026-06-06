@@ -19,6 +19,10 @@ export type ConfigurableCommandOptions = {
   cachePath?: string
   metadataPath?: string
   enrichedMetadataPath?: string
+  trackLocalProducts?: boolean
+  archiveLocalProducts?: boolean
+  pdf2cbzConcurrency?: number
+  pdf2cbzArchiveMode?: 'after' | 'inline' | 'skip' | 'only'
   trove?: boolean
   update?: boolean
   platform?: string[]
@@ -53,6 +57,13 @@ export async function resolveCommandConfig(
     command.error("required option '-l, --library-path <path>' not specified", { exitCode: 1 })
   }
 
+  const transformOverrides = definedConfigOverrides({
+    trackLocalProducts: options.trackLocalProducts,
+    archiveLocalProducts: options.archiveLocalProducts,
+    pdf2cbzConcurrency: options.pdf2cbzConcurrency,
+    pdf2cbzArchiveMode: options.pdf2cbzArchiveMode,
+  }) as NonNullable<ConfigOverrides['transform']>
+  const hasTransformOverrides = Object.keys(transformOverrides).length > 0
   const cliOverrides = definedConfigOverrides({
     cookieFile: options.cookieFile,
     sessionAuth: options.sessionAuth,
@@ -62,6 +73,7 @@ export async function resolveCommandConfig(
     cachePath: options.cachePath,
     metadataPath: options.metadataPath,
     enrichedMetadataPath: options.enrichedMetadataPath,
+    transform: hasTransformOverrides ? transformOverrides : undefined,
     troveOnly: options.trove,
     showProgress: options.progress,
     updateOnly: options.update,
@@ -74,10 +86,18 @@ export async function resolveCommandConfig(
   } satisfies ConfigOverrides)
 
   try {
+    const mergedTransform =
+      loadedConfig?.overrides.transform || cliOverrides.transform
+        ? {
+            ...loadedConfig?.overrides.transform,
+            ...cliOverrides.transform,
+          }
+        : undefined
     return {
       config: resolveConfig({
         ...loadedConfig?.overrides,
         ...cliOverrides,
+        transform: mergedTransform,
       }),
       loadedConfig,
     }

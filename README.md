@@ -104,6 +104,10 @@ configured libraries; a library-level `layout` can still override it:
 {
   "layout": "flat",
   "archiveRoot": "F:/storage/media-archive",
+  "transform": {
+    "trackLocalProducts": true,
+    "archiveLocalProducts": true
+  },
   "libraries": {
     "comics": {
       "path": "Comics/comics",
@@ -418,12 +422,59 @@ PDF’s basename.
 If no path or glob is provided, `pdf2cbz` runs in library mode. Library mode resolves the
 active configured library (for example `--library comics` or `--library manga`), converts all
 PDFs physically under that library root, and writes transform manifest entries to the shared
-cache. If `archiveRoot` is configured, successfully converted source PDFs are moved to the
-archive mirror for that library. If the archive target already exists with the same size, the
-source PDF is removed as a duplicate; if the size differs, the source PDF is kept and the
-transform entry records an archive conflict.
+cache. Humble-matched PDFs use Humble metadata for `ComicInfo.xml`; unmatched local PDFs are
+tracked as local products by default and use filename/folder identity plus accepted local publisher
+or series metadata where available.
 
-Path/glob mode keeps its original local-conversion behavior and does not move source PDFs.
+If `archiveRoot` is configured, successfully converted Humble PDFs are moved to the archive mirror
+for that library. By default, `pdf2cbz` converts and checkpoints cache entries first, then archives
+source PDFs in a second phase. Local PDFs are also archived by default; set
+`transform.archiveLocalProducts` to `false` or pass `--no-archive-local-products` to keep local
+source PDFs beside generated CBZs. Set `transform.trackLocalProducts` to `false` or pass
+`--no-track-local-products` to keep unmatched PDFs as bare transform entries without local
+product identity or generated local metadata `ComicInfo.xml`.
+
+Large libraries can tune conversion behavior in config:
+
+```json
+{
+  "transform": {
+    "pdf2cbzConcurrency": 2,
+    "pdf2cbzArchiveMode": "after"
+  }
+}
+```
+
+`--concurrency <n>` overrides `transform.pdf2cbzConcurrency`. `--archive-mode <after|inline|skip|only>`
+overrides the configured archive mode: `after` converts before archiving, `inline` archives after
+each conversion, `skip` keeps source PDFs, and `only` archives cache-fresh existing CBZ/PDF pairs
+without converting.
+
+Use `--limit <n>` to process a bounded batch of eligible work. This is useful for very large
+libraries or low free disk space. With `--archive-mode inline`, each converted item in the batch is
+archived immediately. With `--archive-mode after`, the command converts the limited batch and then
+archives that same batch before exiting. With `--archive-mode only`, the command archives up to the
+limited number of cache-fresh PDFs.
+
+If the archive target already exists with the same size, the source PDF is removed as a duplicate;
+if the size differs, the source PDF is kept and the transform entry records an archive conflict.
+
+`pdf2cbz` validates generated pages before treating a conversion as successful. The fast path
+extracts embedded PDF images, but it is accepted only when the extracted image count matches the
+PDF page count and uses common CBZ-reader formats (`.jpg`/`.png`). If extraction produces masks,
+fragments, JP2/TIFF/WebP images, or any count mismatch, `pdf2cbz` automatically renders full PDF
+pages to PNG with Poppler before writing the CBZ. Pass `--render` to force full-page rendering for
+all inputs.
+
+Use `--validate` to audit existing transform-cache CBZs against their source PDFs without rewriting
+archives. Use `--repair` to validate existing CBZs and regenerate only the invalid ones from the
+active or archived source PDF; repair mode renders full pages to PNG, preserves `ComicInfo.xml`, and
+does not move or archive source PDFs. Combine `--repair --dry-run` and `--limit <n>` to preview or
+batch large repairs.
+
+Path/glob mode without a config keeps its local-conversion behavior and does not move source PDFs.
+Path/glob mode with a config can track local products and archives only PDFs that are physically
+under a configured library root.
 
 Use `--dry-run` to preview actions without writing CBZs or touching the cache.
 If a CBZ is regenerated, any existing `ComicInfo.xml` stored at the archive root is preserved

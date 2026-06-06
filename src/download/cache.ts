@@ -9,8 +9,19 @@ export type CacheEntry = {
 
 export type PdfCbzCacheEntry = {
   version?: 1
+  transformStatus?: 'generated' | 'failed'
+  source?: 'humble' | 'local'
   libraryName?: string
   libraryPath?: string
+  localProductKey?: string
+  productTitle?: string
+  series?: string
+  publisher?: string
+  metadataSources?: {
+    title?: string
+    series?: string
+    publisher?: string
+  }
   pdfKey?: string
   pdfOriginalPath?: string
   pdfMtimeMs: number
@@ -22,8 +33,14 @@ export type PdfCbzCacheEntry = {
   archiveStatus?: 'not-configured' | 'moved' | 'duplicate-removed' | 'conflict' | 'kept'
   archiveConflictReason?: string
   lastGeneratedMs: number
+  lastFailedMs?: number
+  lastError?: string
   imageCount?: number
+  pageCount?: number
+  conversionMode?: 'extracted' | 'rendered'
+  validationWarnings?: string[]
   renderFallbackUsed?: boolean
+  renderFallbackRequested?: boolean
   comicInfoPreserved?: boolean
   comicInfoGenerated?: boolean
   comicInfoMerged?: boolean
@@ -219,10 +236,39 @@ export function shouldRegeneratePdfCbz(
   if (entry.pdfMtimeMs !== stats.mtimeMs || entry.pdfSize !== stats.size) {
     return true
   }
+  if (entry.transformStatus === 'generated' && entry.pageCount === undefined) {
+    return true
+  }
+  if (
+    entry.transformStatus === 'generated' &&
+    entry.pageCount !== undefined &&
+    entry.imageCount !== undefined &&
+    entry.pageCount !== entry.imageCount
+  ) {
+    return true
+  }
+  if (!cbzStats) {
+    return true
+  }
   if (entry.cbzSize !== undefined || entry.cbzMtimeMs !== undefined) {
-    return !cbzStats || entry.cbzSize !== cbzStats.size || entry.cbzMtimeMs !== cbzStats.mtimeMs
+    return entry.cbzSize !== cbzStats.size || entry.cbzMtimeMs !== cbzStats.mtimeMs
   }
   return false
+}
+
+export function shouldSkipFailedPdfCbz(
+  entry: PdfCbzCacheEntry | undefined,
+  pdfStats: PdfFileStats,
+  force: boolean,
+  renderFallbackRequested = false
+): boolean {
+  return Boolean(
+    entry?.transformStatus === 'failed' &&
+    !force &&
+    entry.pdfMtimeMs === pdfStats.mtimeMs &&
+    entry.pdfSize === pdfStats.size &&
+    Boolean(entry.renderFallbackRequested) === renderFallbackRequested
+  )
 }
 
 export async function loadCache(libraryPath: string, cachePath?: string): Promise<CacheData> {

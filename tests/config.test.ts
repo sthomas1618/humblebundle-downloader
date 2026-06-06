@@ -23,6 +23,12 @@ describe('resolveConfig', () => {
       metadataPath: undefined,
       enrichedMetadataPath: undefined,
       flatConflictResolution: undefined,
+      transform: {
+        trackLocalProducts: true,
+        archiveLocalProducts: true,
+        pdf2cbzConcurrency: 2,
+        pdf2cbzArchiveMode: 'after',
+      },
       hasConfiguredLibraries: false,
       routes: [],
       troveOnly: false,
@@ -59,6 +65,12 @@ describe('resolveConfig', () => {
       archiveFormats: ['PDF', 'EPUB'],
       purchaseKeys: ['key1', 'key2'],
       offlineAudit: true,
+      transform: {
+        trackLocalProducts: false,
+        archiveLocalProducts: true,
+        pdf2cbzConcurrency: 4,
+        pdf2cbzArchiveMode: 'skip',
+      },
     })
 
     expect(config).toMatchObject({
@@ -83,6 +95,12 @@ describe('resolveConfig', () => {
       metadataPath: 'metadata.json',
       enrichedMetadataPath: 'enriched.json',
       archiveRoot: 'Archive',
+      transform: {
+        trackLocalProducts: false,
+        archiveLocalProducts: true,
+        pdf2cbzConcurrency: 4,
+        pdf2cbzArchiveMode: 'skip',
+      },
       layout: 'flat',
       flatConflictResolution: 'prefer-known-md5-then-largest',
       hasConfiguredLibraries: false,

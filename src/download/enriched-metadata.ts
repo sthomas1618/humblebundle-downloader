@@ -367,6 +367,13 @@ async function inspectFile(
   }
 }
 
+export async function inspectEnrichedMetadataFile(
+  filePath: string,
+  matches: EnrichedMetadataMatch[] = []
+): Promise<EnrichedMetadataFile> {
+  return await inspectFile({ path: filePath }, matches)
+}
+
 async function extractEpubFields(filePath: string): Promise<Record<string, string | string[]>> {
   const containerXml = await readZipEntryText(filePath, 'META-INF/container.xml')
   const rootfile = containerXml?.match(/full-path\s*=\s*"([^"]+)"/i)?.[1]
@@ -443,6 +450,8 @@ function extractXmlFields(
     'dc:language',
     'dc:identifier',
     'dc:date',
+    'calibre:series',
+    'prism:publicationName',
   ]) {
     const values = matchXmlTagValues(xml, tag)
     if (values.length === 1) {

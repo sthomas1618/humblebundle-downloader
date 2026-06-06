@@ -20,8 +20,15 @@ const topLevelConfigKeys = new Set([
   'metadataPath',
   'enrichedMetadataPath',
   'archiveRoot',
+  'transform',
   'routes',
   'libraries',
+])
+const transformConfigKeys = new Set([
+  'trackLocalProducts',
+  'archiveLocalProducts',
+  'pdf2cbzConcurrency',
+  'pdf2cbzArchiveMode',
 ])
 const routeConfigKeys = new Set([
   'id',
@@ -99,6 +106,15 @@ export type LibraryRoute = {
   filenamePatterns?: string[]
 }
 
+export type TransformConfig = {
+  trackLocalProducts: boolean
+  archiveLocalProducts: boolean
+  pdf2cbzConcurrency: number
+  pdf2cbzArchiveMode: Pdf2CbzArchiveMode
+}
+
+export type Pdf2CbzArchiveMode = 'after' | 'inline' | 'skip' | 'only'
+
 export type ConfigFileOverrides = {
   configPath: string
   mediaRoot: string
@@ -112,6 +128,7 @@ export type ConfigFileOverrides = {
   metadataPath?: string
   enrichedMetadataPath?: string
   archiveRoot?: string
+  transform?: Partial<TransformConfig>
 }
 
 export type LoadedConfigFile = {
@@ -158,6 +175,8 @@ export type AppConfig = {
   enrichedMetadataPath?: string
   /** Optional root where non-primary archive formats are mirrored. */
   archiveRoot?: string
+  /** Transform behavior for generated artifacts such as PDF to CBZ. */
+  transform: TransformConfig
   /** Only download Humble Trove content. */
   troveOnly: boolean
   /** Whether to show per-item progress indicators. */
@@ -198,6 +217,7 @@ export type ConfigOverrides = {
   metadataPath?: string
   enrichedMetadataPath?: string
   archiveRoot?: string
+  transform?: Partial<TransformConfig>
   troveOnly?: boolean
   showProgress?: boolean
   updateOnly?: boolean
@@ -225,6 +245,7 @@ export type ConfigInitOptions = {
   metadataPath?: string
   enrichedMetadataPath?: string
   archiveRoot?: string
+  transform?: Partial<TransformConfig>
 }
 
 export type ConfigInitResult = {
@@ -242,8 +263,16 @@ type ConfigFileJson = {
   metadataPath?: string
   enrichedMetadataPath?: string
   archiveRoot?: string
+  transform?: Partial<TransformConfig>
   routes?: LibraryRoute[]
   libraries: Record<string, LibraryPreferences>
+}
+
+const DEFAULT_TRANSFORM_CONFIG: TransformConfig = {
+  trackLocalProducts: true,
+  archiveLocalProducts: true,
+  pdf2cbzConcurrency: 2,
+  pdf2cbzArchiveMode: 'after',
 }
 
 function normalizeValues(values?: string[]): string[] | undefined {
@@ -283,6 +312,53 @@ function assertBoolean(value: unknown, field: string): boolean | undefined {
     throw new TypeError(`Config field "${field}" must be a boolean.`)
   }
   return value
+}
+
+function assertPositiveInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new TypeError(`Config field "${field}" must be a positive integer.`)
+  }
+  return value
+}
+
+function assertPdf2CbzArchiveMode(value: unknown, field: string): Pdf2CbzArchiveMode | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (value !== 'after' && value !== 'inline' && value !== 'skip' && value !== 'only') {
+    throw new Error(`Config field "${field}" must be one of: after, inline, skip, only.`)
+  }
+  return value
+}
+
+function normalizeTransformConfig(value: unknown): Partial<TransformConfig> | undefined {
+  if (value === undefined) {
+    return undefined
+  }
+  if (!isObject(value)) {
+    throw new TypeError('Config field "transform" must be an object.')
+  }
+
+  const keys = Object.keys(value)
+  assertKnownKeys(keys, transformConfigKeys, 'transform')
+  return {
+    trackLocalProducts: assertBoolean(value.trackLocalProducts, 'transform.trackLocalProducts'),
+    archiveLocalProducts: assertBoolean(
+      value.archiveLocalProducts,
+      'transform.archiveLocalProducts'
+    ),
+    pdf2cbzConcurrency: assertPositiveInteger(
+      value.pdf2cbzConcurrency,
+      'transform.pdf2cbzConcurrency'
+    ),
+    pdf2cbzArchiveMode: assertPdf2CbzArchiveMode(
+      value.pdf2cbzArchiveMode,
+      'transform.pdf2cbzArchiveMode'
+    ),
+  }
 }
 
 function assertLibraryLayout(value: unknown, field: string): LibraryLayout | undefined {
@@ -551,6 +627,7 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
     data.archiveRoot === undefined
       ? undefined
       : resolveConfigPathValue(assertString(data.archiveRoot, 'archiveRoot'), mediaRoot)
+  const transform = normalizeTransformConfig(data.transform)
 
   return {
     version: CONFIG_VERSION,
@@ -562,6 +639,7 @@ function normalizeConfigFile(data: unknown, configPath: string, mediaRoot: strin
     metadataPath,
     enrichedMetadataPath,
     archiveRoot,
+    transform,
     routes,
     libraries,
   }
@@ -641,6 +719,7 @@ export async function loadConfigFile(configPath: string): Promise<LoadedConfigFi
       metadataPath: configFile.metadataPath,
       enrichedMetadataPath: configFile.enrichedMetadataPath,
       archiveRoot: configFile.archiveRoot,
+      transform: configFile.transform,
     },
   }
 }
@@ -827,6 +906,10 @@ export async function createConfigFile(options: ConfigInitOptions): Promise<Conf
     archiveRoot: options.archiveRoot
       ? formatConfigPathForWrite(options.archiveRoot, mediaRoot)
       : undefined,
+    transform: {
+      ...DEFAULT_TRANSFORM_CONFIG,
+      ...options.transform,
+    },
     routes: defaultRoutesForLibraries(libraries),
     libraries,
   }
@@ -951,6 +1034,16 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     troveOnly: overrides.troveOnly ?? activeLibrary?.troveOnly ?? false,
     showProgress: overrides.showProgress ?? activeLibrary?.showProgress ?? false,
   }
+  const transform = {
+    trackLocalProducts:
+      overrides.transform?.trackLocalProducts ?? DEFAULT_TRANSFORM_CONFIG.trackLocalProducts,
+    archiveLocalProducts:
+      overrides.transform?.archiveLocalProducts ?? DEFAULT_TRANSFORM_CONFIG.archiveLocalProducts,
+    pdf2cbzConcurrency:
+      overrides.transform?.pdf2cbzConcurrency ?? DEFAULT_TRANSFORM_CONFIG.pdf2cbzConcurrency,
+    pdf2cbzArchiveMode:
+      overrides.transform?.pdf2cbzArchiveMode ?? DEFAULT_TRANSFORM_CONFIG.pdf2cbzArchiveMode,
+  }
   const scanLibraries = buildScanLibraries(
     libraryPath,
     effectiveConfig,
@@ -977,6 +1070,7 @@ export function resolveConfig(overrides: ConfigOverrides): AppConfig {
     metadataPath: overrides.metadataPath,
     enrichedMetadataPath: overrides.enrichedMetadataPath,
     archiveRoot: overrides.archiveRoot,
+    transform,
     troveOnly: effectiveConfig.troveOnly,
     showProgress: effectiveConfig.showProgress,
     updateOnly: overrides.updateOnly ?? false,
