@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs'
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -564,6 +564,184 @@ describe('pdf2cbz naming and preservation helpers', () => {
     ).toBeUndefined()
   })
 
+  it('requires local libraries to opt in to PDF archives', () => {
+    const mediaRoot = path.resolve('MediaRoot')
+    const config = resolveConfig({
+      defaultLibrary: 'local_comics',
+      libraryName: 'local_comics',
+      archiveRoot: path.join(mediaRoot, 'Archive'),
+      libraries: {
+        local_comics: {
+          path: path.join(mediaRoot, 'Local Comics'),
+          archiveFormats: ['epub'],
+        },
+      },
+    })
+    const library = config.scanLibraries.find((scanLibrary) => scanLibrary.name === 'local_comics')
+    const pdfPath = path.join(mediaRoot, 'Local Comics', 'Example Series', 'issue-001.pdf')
+
+    expect(
+      pdf2cbzCommandTestUtils.resolvePdfArchivePath(config, library, pdfPath, false, true, {
+        trackLocalProducts: true,
+        archiveLocalProducts: true,
+      })
+    ).toBeUndefined()
+  })
+
+  it('refuses archive targets inside the source local library', () => {
+    const mediaRoot = path.resolve('MediaRoot')
+    const config = resolveConfig({
+      defaultLibrary: 'local_comics',
+      libraryName: 'local_comics',
+      archiveRoot: path.join(mediaRoot, 'Local Comics', 'Archive'),
+      libraries: {
+        local_comics: {
+          path: path.join(mediaRoot, 'Local Comics'),
+          archiveFormats: ['pdf'],
+        },
+      },
+    })
+    const library = config.scanLibraries.find((scanLibrary) => scanLibrary.name === 'local_comics')
+    const pdfPath = path.join(mediaRoot, 'Local Comics', 'Example Series', 'issue-001.pdf')
+
+    expect(() =>
+      pdf2cbzCommandTestUtils.resolvePdfArchivePath(config, library, pdfPath, false, true, {
+        trackLocalProducts: true,
+        archiveLocalProducts: true,
+      })
+    ).toThrow('Refusing to archive source PDF into its source library')
+  })
+
+  it('archives cache-fresh PDFs from a configured local-only library without Humble auth', async () => {
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'hbd-pdf2cbz-test-'))
+
+    try {
+      const mediaRoot = path.join(temporaryDirectory, 'Media')
+      const libraryPath = path.join(mediaRoot, 'Local Comics')
+      const archiveRoot = path.join(mediaRoot, 'Archive')
+      const cachePath = path.join(temporaryDirectory, 'cache.json')
+      const configPath = path.join(mediaRoot, '.hbd', 'config.json')
+      const pdfPath = path.join(libraryPath, 'Example Series', 'issue-001.pdf')
+      const cbzPath = path.join(libraryPath, 'Example Series', 'issue-001.cbz')
+      const archivePath = path.join(archiveRoot, 'Local Comics', 'Example Series', 'issue-001.pdf')
+      await mkdir(path.dirname(pdfPath), { recursive: true })
+      await mkdir(path.dirname(configPath), { recursive: true })
+      await writeFile(pdfPath, '%PDF-1.7\n%%EOF')
+      await writeFile(cbzPath, 'existing cbz')
+      const [pdfStats, cbzStats] = await Promise.all([stat(pdfPath), stat(cbzPath)])
+      await writeFile(
+        cachePath,
+        `${JSON.stringify(
+          {
+            transforms: {
+              pdf: {
+                cbz: {
+                  version: 1,
+                  entries: {
+                    [path.join('Example Series', 'issue-001.pdf')]: {
+                      version: 1,
+                      transformStatus: 'generated',
+                      source: 'local',
+                      libraryName: 'local_comics',
+                      libraryPath,
+                      localProductKey: `local_comics:${path.join(
+                        'Example Series',
+                        'issue-001.pdf'
+                      )}`,
+                      productTitle: 'issue-001',
+                      series: 'Example Series',
+                      metadataSources: {
+                        title: 'filename',
+                        series: 'path-parent',
+                      },
+                      pdfKey: path.join('Example Series', 'issue-001.pdf'),
+                      pdfOriginalPath: pdfPath,
+                      pdfMtimeMs: pdfStats.mtimeMs,
+                      pdfSize: pdfStats.size,
+                      cbzPath,
+                      cbzMtimeMs: cbzStats.mtimeMs,
+                      cbzSize: cbzStats.size,
+                      archiveStatus: 'kept',
+                      lastGeneratedMs: Date.now(),
+                      imageCount: 1,
+                      pageCount: 1,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          undefined,
+          2
+        )}\n`
+      )
+      await writeFile(
+        configPath,
+        `${JSON.stringify(
+          {
+            version: 1,
+            defaultLibrary: 'local_comics',
+            cachePath,
+            archiveRoot,
+            transform: {
+              trackLocalProducts: true,
+              archiveLocalProducts: true,
+              pdf2cbzArchiveMode: 'after',
+            },
+            libraries: {
+              local_comics: {
+                path: 'Local Comics',
+                layout: 'flat',
+                formatPriority: ['cbz', 'pdf'],
+                extInclude: ['cbz', 'pdf'],
+                archiveFormats: ['pdf'],
+              },
+            },
+          },
+          undefined,
+          2
+        )}\n`
+      )
+      const program = new Command()
+      program.exitOverride()
+      registerPdf2CbzCommand(program)
+
+      await program.parseAsync(
+        [
+          'node',
+          'hbd',
+          'pdf2cbz',
+          '--config',
+          configPath,
+          '--library',
+          'local_comics',
+          '--archive-mode',
+          'only',
+        ],
+        { from: 'node' }
+      )
+
+      expect(await pathExists(pdfPath)).toBe(false)
+      expect(await readFile(archivePath, 'utf8')).toBe('%PDF-1.7\n%%EOF')
+      expect(await readFile(cbzPath, 'utf8')).toBe('existing cbz')
+      const updatedCache = JSON.parse(await readFile(cachePath, 'utf8')) as {
+        transforms?: {
+          pdf?: {
+            cbz?: {
+              entries?: Record<string, { archiveStatus?: string; archivePdfPath?: string }>
+            }
+          }
+        }
+      }
+      const entry =
+        updatedCache.transforms?.pdf?.cbz?.entries?.[path.join('Example Series', 'issue-001.pdf')]
+      expect(entry?.archiveStatus).toBe('moved')
+      expect(entry?.archivePdfPath).toBe(archivePath)
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true })
+    }
+  })
+
   it('formats dry-run details for Humble, local, and untracked PDFs', async () => {
     const pdfPath = path.join('/library', 'Local Series', 'issue-001.pdf')
     const localProduct = await pdf2cbzCommandTestUtils.buildLocalProductIdentity(
@@ -761,5 +939,81 @@ describe('pdf2cbz naming and preservation helpers', () => {
     expect(pdf2cbzCommandTestUtils.formatValidationSummary(true, 82, 82, ['.png'], [])).toBe(
       'ok; pages 82; images 82; formats .png'
     )
+  })
+
+  it('selects JPEG render fallback by default and PNG for manga signals', () => {
+    expect(
+      pdf2cbzCommandTestUtils.selectRenderImageFormat({
+        pdfPath: path.join('/library', 'Local Comics', 'Example Series', 'issue-001.pdf'),
+        library: {
+          name: 'local_comics',
+          path: path.join('/library', 'Local Comics'),
+        },
+      })
+    ).toBe('jpg')
+
+    expect(
+      pdf2cbzCommandTestUtils.selectRenderImageFormat({
+        pdfPath: path.join('/library', 'Comics', 'Manga', 'Example Series', 'issue-001.pdf'),
+        library: {
+          name: 'local_comics',
+          path: path.join('/library', 'Comics'),
+        },
+      })
+    ).toBe('png')
+
+    expect(
+      pdf2cbzCommandTestUtils.selectRenderImageFormat({
+        pdfPath: path.join('/library', 'Comics', 'Example Series', 'issue-001.pdf'),
+        library: {
+          name: 'manga',
+          path: path.join('/library', 'Comics'),
+        },
+      })
+    ).toBe('png')
+
+    expect(
+      pdf2cbzCommandTestUtils.selectRenderImageFormat({
+        pdfPath: path.join('/library', 'Comics', 'Example Series', 'issue-001.pdf'),
+        library: {
+          name: 'local_comics',
+          path: path.join('/library', 'Comics'),
+        },
+        humbleComicInfoFields: {
+          Title: 'Example Manga Volume 1',
+        },
+      })
+    ).toBe('png')
+  })
+
+  it('forces rerender only when a valid rendered entry should change format', () => {
+    const renderedEntry = {
+      version: 1,
+      transformStatus: 'generated',
+      pdfKey: 'Example Series/issue-001.pdf',
+      cbzPath: path.join('/library', 'Example Series', 'issue-001.cbz'),
+      conversionMode: 'rendered',
+    } as const
+
+    expect(pdf2cbzCommandTestUtils.shouldForceRerenderValidEntry(renderedEntry, 'jpg')).toBe(true)
+    expect(pdf2cbzCommandTestUtils.shouldForceRerenderValidEntry(renderedEntry, 'png')).toBe(false)
+    expect(
+      pdf2cbzCommandTestUtils.shouldForceRerenderValidEntry(
+        { ...renderedEntry, renderImageFormat: 'png' },
+        'jpg'
+      )
+    ).toBe(true)
+    expect(
+      pdf2cbzCommandTestUtils.shouldForceRerenderValidEntry(
+        { ...renderedEntry, renderImageFormat: 'jpg' },
+        'jpg'
+      )
+    ).toBe(false)
+    expect(
+      pdf2cbzCommandTestUtils.shouldForceRerenderValidEntry(
+        { ...renderedEntry, conversionMode: 'extracted' },
+        'jpg'
+      )
+    ).toBe(false)
   })
 })

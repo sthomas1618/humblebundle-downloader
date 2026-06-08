@@ -1,11 +1,22 @@
-import { mkdir, readdir } from 'node:fs/promises'
+import { mkdir, readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 /**
  * Ensure the parent directory for a file path exists.
  */
 export async function ensureDirectory(pathToFile: string): Promise<void> {
-  await mkdir(path.dirname(pathToFile), { recursive: true })
+  const directory = path.dirname(pathToFile)
+  try {
+    await mkdir(directory, { recursive: true })
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
+      const existing = await stat(directory)
+      if (existing.isDirectory()) {
+        return
+      }
+    }
+    throw error
+  }
 }
 
 /**

@@ -463,18 +463,53 @@ if the size differs, the source PDF is kept and the transform entry records an a
 extracts embedded PDF images, but it is accepted only when the extracted image count matches the
 PDF page count and uses common CBZ-reader formats (`.jpg`/`.png`). If extraction produces masks,
 fragments, JP2/TIFF/WebP images, or any count mismatch, `pdf2cbz` automatically renders full PDF
-pages to PNG with Poppler before writing the CBZ. Pass `--render` to force full-page rendering for
-all inputs.
+pages with Poppler before writing the CBZ. Render fallback uses JPEG quality 90 by default to avoid
+oversized archives, but keeps PNG for manga-like inputs when the library name, folder path, title, or
+series contains `manga`. Pass `--render` to force full-page rendering for all inputs.
 
 Use `--validate` to audit existing transform-cache CBZs against their source PDFs without rewriting
 archives. Use `--repair` to validate existing CBZs and regenerate only the invalid ones from the
-active or archived source PDF; repair mode renders full pages to PNG, preserves `ComicInfo.xml`, and
-does not move or archive source PDFs. Combine `--repair --dry-run` and `--limit <n>` to preview or
-batch large repairs.
+active or archived source PDF; repair mode uses the same JPEG/PNG render fallback heuristic,
+preserves `ComicInfo.xml`, and does not move or archive source PDFs. Add `--force` with `--repair`
+to rerender valid cached entries that were previously rendered in a different image format, such as
+older PNG fallback archives that now select JPEG. Combine `--repair --dry-run` and `--limit <n>` to
+preview or batch large repairs.
 
 Path/glob mode without a config keeps its local-conversion behavior and does not move source PDFs.
 Path/glob mode with a config can track local products and archives only PDFs that are physically
 under a configured library root.
+
+Non-Humble folders can be managed as local-only configured libraries. This keeps the same cache,
+validation, repair, and archive behavior without adding a separate command. For example:
+
+```json
+{
+  "archiveRoot": "C:/Users/example/Media/Archive",
+  "transform": {
+    "trackLocalProducts": true,
+    "archiveLocalProducts": true,
+    "pdf2cbzArchiveMode": "after"
+  },
+  "libraries": {
+    "local_comics": {
+      "path": "C:/Users/example/Media/Comics/Local",
+      "layout": "flat",
+      "formatPriority": ["cbz", "pdf"],
+      "extInclude": ["cbz", "pdf"],
+      "archiveFormats": ["pdf"]
+    }
+  }
+}
+```
+
+With this setup, generated CBZ files stay beside the source PDFs, and successfully converted PDFs
+move to the archive mirror for that configured library. Preview first, then run the batch:
+
+```bash
+bun run hbd pdf2cbz --config <config> --library local_comics --dry-run
+bun run hbd pdf2cbz --config <config> --library local_comics
+bun run hbd pdf2cbz --config <config> --library local_comics --archive-mode only --dry-run
+```
 
 Use `--dry-run` to preview actions without writing CBZs or touching the cache.
 If a CBZ is regenerated, any existing `ComicInfo.xml` stored at the archive root is preserved

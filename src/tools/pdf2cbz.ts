@@ -14,6 +14,7 @@ import {
   runPdfRender,
   validatePdfImageSet,
   type ComicInfoFields,
+  type PdfRenderImageFormat,
 } from './pdf2cbz-helpers'
 
 export { pdf2cbzTestUtils } from './pdf2cbz-helpers'
@@ -22,6 +23,8 @@ export type Pdf2CbzOptions = {
   cbzPath: string
   keepTemp?: boolean
   renderFallback?: boolean
+  renderImageFormat?: PdfRenderImageFormat
+  renderJpegQuality?: number
   renderTool?: 'pdftoppm' | 'mutool'
   comicInfoFields?: ComicInfoFields
 }
@@ -32,6 +35,7 @@ export type Pdf2CbzResult = {
   imageCount: number
   usedRenderFallback: boolean
   conversionMode: 'extracted' | 'rendered'
+  renderImageFormat?: PdfRenderImageFormat
   pageCount: number
   validationWarnings: string[]
   comicInfoPreserved: boolean
@@ -48,6 +52,7 @@ export async function convertPdfToCbz(
   const outputPrefix = path.join(temporaryDirectory, 'page')
   let usedRenderFallback = false
   let conversionMode: 'extracted' | 'rendered' = 'extracted'
+  const renderImageFormat = options.renderImageFormat ?? 'png'
   let validationWarnings: string[] = []
   let preservedComicInfo: Buffer | undefined
 
@@ -65,7 +70,13 @@ export async function convertPdfToCbz(
       usedRenderFallback = true
       conversionMode = 'rendered'
       const tool = options.renderTool ?? 'pdftoppm'
-      await runPdfRender(pdfPath, temporaryDirectory, tool)
+      await runPdfRender(
+        pdfPath,
+        temporaryDirectory,
+        tool,
+        renderImageFormat,
+        options.renderJpegQuality
+      )
       images = await collectImages(temporaryDirectory)
     } else {
       await runPdfImages(pdfPath, outputPrefix)
@@ -79,7 +90,13 @@ export async function convertPdfToCbz(
         await removeImages(temporaryDirectory)
         usedRenderFallback = true
         conversionMode = 'rendered'
-        await runPdfRender(pdfPath, temporaryDirectory, 'pdftoppm')
+        await runPdfRender(
+          pdfPath,
+          temporaryDirectory,
+          'pdftoppm',
+          renderImageFormat,
+          options.renderJpegQuality
+        )
         images = await collectImages(temporaryDirectory)
       }
     }
@@ -105,6 +122,7 @@ export async function convertPdfToCbz(
       imageCount: images.length,
       usedRenderFallback,
       conversionMode,
+      renderImageFormat: conversionMode === 'rendered' ? renderImageFormat : undefined,
       pageCount,
       validationWarnings,
       comicInfoPreserved: comicInfo.preserved,
