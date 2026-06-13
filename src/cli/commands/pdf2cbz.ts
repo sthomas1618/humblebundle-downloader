@@ -27,7 +27,11 @@ import {
 } from '../../download/enriched-metadata'
 import { loadMetadata, type MetadataData, type MetadataProduct } from '../../download/metadata'
 import { convertPdfToCbz } from '../../tools/pdf2cbz'
-import { validateCbzAgainstPdf, type ComicInfoFields } from '../../tools/pdf2cbz-helpers'
+import {
+  validateCbzAgainstPdf,
+  type ComicInfoFields,
+  type PdfRenderImageFormat,
+} from '../../tools/pdf2cbz-helpers'
 import { runWithConcurrency } from '../../utils/async'
 import { normalizeFlatProductKey } from '../../utils/fs'
 import { commonParentDirectory } from '../../utils/path'
@@ -125,6 +129,13 @@ type PdfDryRunDetails = {
   targetArchivePath?: string
 }
 
+type RenderFormatContext = {
+  pdfPath: string
+  library?: ScanLibraryConfig
+  humbleComicInfoFields?: ComicInfoFields
+  localProduct?: LocalProductIdentity
+}
+
 function isSamePath(left: string, right: string): boolean {
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
 }
@@ -132,6 +143,25 @@ function isSamePath(left: string, right: string): boolean {
 function isPathInsideOrSame(childPath: string, parentPath: string): boolean {
   const relativePath = path.relative(path.resolve(parentPath), path.resolve(childPath))
   return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+}
+
+function hasMangaSignal(value: string | undefined): boolean {
+  return Boolean(value && /\bmanga\b/i.test(value))
+}
+
+function selectRenderImageFormat(context: RenderFormatContext): PdfRenderImageFormat {
+  const signalValues = [
+    context.pdfPath,
+    context.library?.name,
+    context.library?.path,
+    context.humbleComicInfoFields?.Title,
+    context.humbleComicInfoFields?.Series,
+    context.humbleComicInfoFields?.Publisher,
+    context.localProduct?.productTitle,
+    context.localProduct?.series,
+    context.localProduct?.publisher,
+  ]
+  return signalValues.some((value) => hasMangaSignal(value)) ? 'png' : 'jpg'
 }
 
 async function fileStats(filePath: string): Promise<PdfFileStats | undefined> {
@@ -261,11 +291,20 @@ function archivePdfPath(
   library: ScanLibraryConfig,
   pdfPath: string
 ): string | undefined {
+  if (!library.archiveFormats?.includes('pdf')) {
+    return undefined
+  }
   const archiveLibraryPath = getArchiveLibraryPath(config, library)
   if (!archiveLibraryPath) {
     return undefined
   }
-  return path.join(archiveLibraryPath, path.relative(library.path, pdfPath))
+  const targetPath = path.join(archiveLibraryPath, path.relative(library.path, pdfPath))
+  if (!isSamePath(pdfPath, targetPath) && isPathInsideOrSame(targetPath, library.path)) {
+    throw new Error(
+      `Refusing to archive source PDF into its source library: ${pdfPath} -> ${targetPath}`
+    )
+  }
+  return targetPath
 }
 
 function resolvePdfArchivePath(
@@ -672,6 +711,19 @@ function formatValidationSummary(
   return `${status}; pages ${pageCount}; images ${imageCount}; formats ${extensionLabel}${reasonLabel}`
 }
 
+function shouldForceRerenderValidEntry(
+  entry: RepairCandidate['entry'],
+  selectedRenderImageFormat: PdfRenderImageFormat
+): boolean {
+  if (entry.conversionMode !== 'rendered') {
+    return false
+  }
+  if (entry.renderImageFormat) {
+    return entry.renderImageFormat !== selectedRenderImageFormat
+  }
+  return selectedRenderImageFormat === 'jpg'
+}
+
 async function runPdf2CbzRepairMode(options: {
   cache: Awaited<ReturnType<typeof loadCache>>
   cacheLibraryPath: string
@@ -682,6 +734,7 @@ async function runPdf2CbzRepairMode(options: {
   transformConfig: Pdf2CbzTransformConfig
   dryRun: boolean
   repair: boolean
+  force: boolean
   limit?: number
   keepTemp?: boolean
   concurrency: number
@@ -754,8 +807,33 @@ async function runPdf2CbzRepairMode(options: {
         validation.imageExtensions,
         validation.reasons
       )
+      const pdfLibrary = entry.libraryPath
+        ? ({ name: entry.libraryName, path: entry.libraryPath } satisfies ScanLibraryConfig)
+        : options.library
+      const humbleComicInfoFields = buildComicInfoFields(entry.pdfOriginalPath ?? sourcePdfPath, {
+        ...options.comicInfoContext,
+      })
+      const localProduct =
+        !humbleComicInfoFields && options.transformConfig.trackLocalProducts
+          ? await buildLocalProductIdentity(
+              entry.pdfOriginalPath ?? sourcePdfPath,
+              options.comicInfoContext,
+              cacheKey,
+              pdfLibrary
+            )
+          : undefined
+      const renderImageFormat = selectRenderImageFormat({
+        pdfPath: entry.pdfOriginalPath ?? sourcePdfPath,
+        library: pdfLibrary,
+        humbleComicInfoFields,
+        localProduct,
+      })
+      const forceRerender =
+        validation.valid && options.repair && options.force
+          ? shouldForceRerenderValidEntry(entry, renderImageFormat)
+          : false
 
-      if (validation.valid) {
+      if (validation.valid && !forceRerender) {
         counts.ok += 1
         console.log(`Validated CBZ: ${entry.cbzPath}; ${summary}`)
         if (
@@ -780,7 +858,11 @@ async function runPdf2CbzRepairMode(options: {
         return
       }
 
-      counts.repairNeeded += 1
+      if (validation.valid) {
+        counts.ok += 1
+      } else {
+        counts.repairNeeded += 1
+      }
       if (!options.repair) {
         console.log(`Repair needed: ${entry.cbzPath}; ${summary}`)
         return
@@ -790,31 +872,19 @@ async function runPdf2CbzRepairMode(options: {
       }
       if (options.dryRun) {
         counts.dryRun += 1
-        console.log(`Dry run: repair ${sourcePdfPath} -> ${entry.cbzPath}; ${summary}`)
+        const action = forceRerender ? 'rerender' : 'repair'
+        console.log(`Dry run: ${action} ${sourcePdfPath} -> ${entry.cbzPath}; ${summary}`)
         return
       }
 
-      const pdfLibrary = entry.libraryPath
-        ? ({ name: entry.libraryName, path: entry.libraryPath } satisfies ScanLibraryConfig)
-        : options.library
-      const humbleComicInfoFields = buildComicInfoFields(entry.pdfOriginalPath ?? sourcePdfPath, {
-        ...options.comicInfoContext,
-      })
-      const localProduct =
-        !humbleComicInfoFields && options.transformConfig.trackLocalProducts
-          ? await buildLocalProductIdentity(
-              entry.pdfOriginalPath ?? sourcePdfPath,
-              options.comicInfoContext,
-              cacheKey,
-              pdfLibrary
-            )
-          : undefined
       const startedAt = Date.now()
-      console.log(`Repairing CBZ: ${sourcePdfPath} -> ${entry.cbzPath}; ${summary}`)
+      const actionLabel = forceRerender ? 'Rerendering CBZ' : 'Repairing CBZ'
+      console.log(`${actionLabel}: ${sourcePdfPath} -> ${entry.cbzPath}; ${summary}`)
       const result = await convertPdfToCbz(sourcePdfPath, {
         cbzPath: entry.cbzPath,
         keepTemp: options.keepTemp,
         renderFallback: true,
+        renderImageFormat,
         comicInfoFields: humbleComicInfoFields ?? localProduct?.comicInfoFields,
       })
       const pdfStats = await fileStats(sourcePdfPath)
@@ -835,6 +905,7 @@ async function runPdf2CbzRepairMode(options: {
         imageCount: result.imageCount,
         pageCount: result.pageCount,
         conversionMode: result.conversionMode,
+        renderImageFormat: result.renderImageFormat,
         validationWarnings: result.validationWarnings,
         renderFallbackUsed: result.usedRenderFallback,
         comicInfoPreserved: result.comicInfoPreserved,
@@ -845,11 +916,11 @@ async function runPdf2CbzRepairMode(options: {
       counts.repaired += 1
       await checkpointCache()
       console.log(
-        `Repaired CBZ: ${entry.cbzPath}; elapsed ${formatElapsed(
+        `${forceRerender ? 'Rerendered' : 'Repaired'} CBZ: ${entry.cbzPath}; elapsed ${formatElapsed(
           Date.now() - startedAt
-        )}; pages ${result.pageCount}; images ${result.imageCount}; cbz ${formatByteSize(
-          cbzStats?.size
-        )}`
+        )}; pages ${result.pageCount}; images ${result.imageCount}; render ${
+          result.renderImageFormat ?? 'extracted'
+        }; cbz ${formatByteSize(cbzStats?.size)}`
       )
     } catch (error) {
       counts.failed += 1
@@ -874,6 +945,8 @@ export const pdf2cbzCommandTestUtils = {
   formatProgressTotals,
   moveFileAcrossDevices,
   resolvePdfArchivePath,
+  selectRenderImageFormat,
+  shouldForceRerenderValidEntry,
 }
 
 export function registerPdf2CbzCommand(program: Command): void {
@@ -996,6 +1069,7 @@ export function registerPdf2CbzCommand(program: Command): void {
           transformConfig,
           dryRun: Boolean(options.dryRun || options.validate),
           repair: options.repair ?? false,
+          force: options.force ?? false,
           limit,
           keepTemp: options.keepTemp,
           concurrency,
@@ -1276,11 +1350,18 @@ export function registerPdf2CbzCommand(program: Command): void {
             return
           }
 
+          const renderImageFormat = selectRenderImageFormat({
+            pdfPath,
+            library: pdfLibrary,
+            humbleComicInfoFields,
+            localProduct,
+          })
           console.log(`Converting ${pdfPath} -> ${cbzPath}`)
           const result = await convertPdfToCbz(pdfPath, {
             cbzPath,
             keepTemp: options.keepTemp,
             renderFallback: options.render,
+            renderImageFormat,
             comicInfoFields: humbleComicInfoFields ?? localProduct?.comicInfoFields,
           })
           const generatedStats = await fileStats(cbzPath)
@@ -1329,6 +1410,7 @@ export function registerPdf2CbzCommand(program: Command): void {
             imageCount: result.imageCount,
             pageCount: result.pageCount,
             conversionMode: result.conversionMode,
+            renderImageFormat: result.renderImageFormat,
             validationWarnings: result.validationWarnings,
             renderFallbackUsed: result.usedRenderFallback,
             comicInfoPreserved: result.comicInfoPreserved,
@@ -1343,7 +1425,9 @@ export function registerPdf2CbzCommand(program: Command): void {
               Date.now() - itemStartedAt
             )}; pages ${result.pageCount}; images ${result.imageCount}; mode ${
               result.conversionMode
-            }; cbz ${formatByteSize(generatedStats?.size)}; archive ${archiveResult.archiveStatus}${
+            }; render ${result.renderImageFormat ?? 'extracted'}; cbz ${formatByteSize(
+              generatedStats?.size
+            )}; archive ${archiveResult.archiveStatus}${
               result.validationWarnings.length > 0
                 ? `; extraction rejected: ${result.validationWarnings.join('; ')}`
                 : ''

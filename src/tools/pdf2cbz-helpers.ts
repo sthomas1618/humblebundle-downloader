@@ -38,6 +38,8 @@ export type CbzImageSetInspection = {
   entries: string[]
 }
 
+export type PdfRenderImageFormat = 'jpg' | 'png'
+
 export function naturalSort(a: string, b: string): number {
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
   return collator.compare(a, b)
@@ -59,15 +61,20 @@ export async function getPdfPageCount(pdfPath: string): Promise<number> {
 export async function runPdfRender(
   pdfPath: string,
   outputDirectory: string,
-  tool: 'pdftoppm' | 'mutool'
+  tool: 'pdftoppm' | 'mutool',
+  imageFormat: PdfRenderImageFormat = 'png',
+  jpegQuality = 90
 ): Promise<void> {
   if (tool === 'mutool') {
-    const outputTemplate = path.join(outputDirectory, 'page-%04d.png')
+    const outputExtension = imageFormat === 'jpg' ? 'jpg' : 'png'
+    const outputTemplate = path.join(outputDirectory, `page-%04d.${outputExtension}`)
     await runCommand('mutool', ['draw', '-o', outputTemplate, pdfPath])
     return
   }
   const outputPrefix = path.join(outputDirectory, 'page')
-  await runCommand('pdftoppm', ['-png', pdfPath, outputPrefix])
+  const formatArguments =
+    imageFormat === 'jpg' ? ['-jpeg', '-jpegopt', `quality=${jpegQuality}`] : ['-png']
+  await runCommand('pdftoppm', [...formatArguments, pdfPath, outputPrefix])
 }
 
 export async function collectImages(directory: string): Promise<string[]> {

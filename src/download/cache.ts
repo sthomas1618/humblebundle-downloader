@@ -38,6 +38,7 @@ export type PdfCbzCacheEntry = {
   imageCount?: number
   pageCount?: number
   conversionMode?: 'extracted' | 'rendered'
+  renderImageFormat?: 'jpg' | 'png'
   validationWarnings?: string[]
   renderFallbackUsed?: boolean
   renderFallbackRequested?: boolean
